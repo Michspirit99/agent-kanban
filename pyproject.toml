@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nerkoman/agent-kanban"
-Repository = "https://github.com/nerkoman/agent-kanban"
-Issues = "https://github.com/nerkoman/agent-kanban/issues"
+Homepage = "https://github.com/Michspirit99/agent-kanban"
+Repository = "https://github.com/Michspirit99/agent-kanban"
+Issues = "https://github.com/Michspirit99/agent-kanban/issues"
 
 [tool.uv]
 # We're not a PyPI-publishable package — just managed deps + an entry point.
