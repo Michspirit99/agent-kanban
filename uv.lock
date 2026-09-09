@@ -4,11 +4,12 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "agent-kanban"
-version = "0.1.1"
+version = "0.1.2"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "fastapi-mcp" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
@@ -16,7 +17,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -25,7 +25,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastapi-mcp", specifier = ">=0.4" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
