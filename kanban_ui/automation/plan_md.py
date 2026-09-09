@@ -33,7 +33,6 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from kanban_store import Store
 

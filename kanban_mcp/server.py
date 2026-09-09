@@ -31,9 +31,7 @@ On failure a human-readable message is returned; the MCP layer does not crash.
 """
 from __future__ import annotations
 
-import json
 import os
-import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
