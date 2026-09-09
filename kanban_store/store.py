@@ -513,6 +513,11 @@ class Store:
 
     def add_link(self, task_id: str, type_: str, value: str) -> None:
         with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(task_id)
             self._conn.execute(
                 "INSERT OR IGNORE INTO task_links (task_id, type, value) VALUES (?, ?, ?)",
                 (task_id, type_, value),
@@ -522,13 +527,26 @@ class Store:
         with self._lock:
             self._conn.execute("BEGIN")
             try:
+                row = self._conn.execute(
+                    "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+                ).fetchone()
+                if not row:
+                    raise KeyError(task_id)
+                for blocker_id in blocker_ids:
+                    if blocker_id == task_id:
+                        raise ValueError("a task cannot block itself")
+                    blocker = self._conn.execute(
+                        "SELECT 1 FROM tasks WHERE id=?", (blocker_id,)
+                    ).fetchone()
+                    if not blocker:
+                        raise ValueError(f"blocker task {blocker_id} not found")
                 self._conn.execute(
                     "DELETE FROM task_blockers WHERE task_id=?", (task_id,)
                 )
-                for b in blocker_ids:
+                for blocker_id in blocker_ids:
                     self._conn.execute(
                         "INSERT INTO task_blockers (task_id, blocker_id) VALUES (?, ?)",
-                        (task_id, b),
+                        (task_id, blocker_id),
                     )
                 self._conn.execute("COMMIT")
             except Exception:

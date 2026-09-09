@@ -692,13 +692,21 @@ async def add_comment(task_id: str, req: CommentRequest) -> dict[str, Any]:
 def add_link(task_id: str, req: LinkRequest) -> dict[str, Any]:
     if req.type not in {"memory", "file", "pr", "url"}:
         raise HTTPException(400, "type must be memory/file/pr/url")
-    _store.add_link(task_id, req.type, req.value)
+    try:
+        _store.add_link(task_id, req.type, req.value)
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
     return {"ok": True}
 
 
 @app.post("/api/tasks/{task_id}/blockers")
 def set_blockers(task_id: str, req: BlockersRequest) -> dict[str, Any]:
-    _store.set_blockers(task_id, req.blocker_ids)
+    try:
+        _store.set_blockers(task_id, req.blocker_ids)
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"ok": True, "blockers": req.blocker_ids}
 
 
