@@ -30,6 +30,14 @@ from .migrations import BUSY_TIMEOUT_MS, apply_migrations
 from .models import DEFAULT_PROJECT_ID, Issue, TaskHistory
 from .snapshot_format import normalize_snapshot
 from .snapshot_io import write_json_atomic
+from .workflows import (
+    WORKFLOW_ID_RE,
+    Workflow,
+    WorkflowError,
+    WorkflowStatus,
+    default_workflow,
+    validate_workflow_statuses,
+)
 
 # ``Task`` is the historical public name; ``Issue`` is the canonical model.
 Task = Issue
@@ -39,36 +47,17 @@ class SnapshotImportConflict(ValueError):
     """Raised when imported durable data conflicts with an existing row."""
 
 # ============================================================================
-# Status model
+# Status model — derived from the central workflow registry (see
+# kanban_store/workflows.py). ``STATUSES``/``status_meta`` describe the
+# default workflow and remain as compatibility exports.
 # ============================================================================
 
-# 9 columns in left-to-right UI order.
-STATUSES: list[str] = [
-    "backlog",
-    "approved",
-    "analyst",
-    "in_progress",
-    "testing",
-    "uat",
-    "done",
-    "blocked",
-    "cancelled",
-]
+STATUSES: list[str] = default_workflow().status_keys()
 
 
 def status_meta() -> list[dict[str, str]]:
-    """Column metadata for the UI (label + cssClass)."""
-    return [
-        {"id": "backlog",     "title": "Backlog",      "owner": "user"},
-        {"id": "approved",    "title": "Approved",     "owner": "agent"},
-        {"id": "analyst",     "title": "Analyst",      "owner": "agent"},
-        {"id": "in_progress", "title": "In progress",  "owner": "agent"},
-        {"id": "testing",     "title": "Testing",      "owner": "agent"},
-        {"id": "uat",         "title": "UAT",          "owner": "user"},
-        {"id": "done",        "title": "Done",         "owner": "user"},
-        {"id": "blocked",     "title": "Blocked",      "owner": "any"},
-        {"id": "cancelled",   "title": "Cancelled",    "owner": "user"},
-    ]
+    """Column metadata for the default workflow (id + label + owner)."""
+    return default_workflow().columns()
 
 
 # ============================================================================
@@ -87,6 +76,7 @@ class Project:
     archived: bool
     created_at: str
     path: str | None = None
+    workflow_id: str = "default"
     task_counts: dict[str, int] = field(default_factory=dict)
     total_tasks: int = 0
 
@@ -237,8 +227,6 @@ class Store:
         reporter: str | None = None,
         labels: list[str] | None = None,
     ) -> Task:
-        if status not in STATUSES:
-            raise ValueError(f"unknown status: {status}")
         _validate_issue_fields(issue_type, labels)
         ts = _now()
         with self._lock:
@@ -249,6 +237,11 @@ class Store:
                 ).fetchone()
                 if not project_row:
                     raise ValueError(f"project {project_id!r} not found")
+                workflow = self.get_project_workflow(project_id)
+                if status not in workflow.status_keys():
+                    raise ValueError(
+                        f"unknown status {status!r} for project workflow {workflow.id!r}"
+                    )
                 tid = task_id or self._next_id()
                 # column_order — last in the column + 1 (per project)
                 row = self._conn.execute(
@@ -317,8 +310,6 @@ class Store:
         comment: str | None = None,
         column_order: int | None = None,
     ) -> Task:
-        if to_status not in STATUSES:
-            raise ValueError(f"unknown status: {to_status}")
         ts = _now()
         with self._lock:
             self._conn.execute("BEGIN")
@@ -330,6 +321,11 @@ class Store:
                     raise KeyError(task_id)
                 from_status = row["status"]
                 project_id = row["project_id"]
+                workflow = self.get_project_workflow(project_id)
+                if to_status not in workflow.status_keys():
+                    raise ValueError(
+                        f"unknown status {to_status!r} for project workflow {workflow.id!r}"
+                    )
                 # column_order — append to the end of the project's column when not specified
                 if column_order is None:
                     r2 = self._conn.execute(
@@ -685,6 +681,150 @@ class Store:
         return p
 
     # ------------------------------------------------------------------
+    # Workflows (central registry; see kanban_store/workflows.py)
+    # ------------------------------------------------------------------
+
+    def get_workflow(self, workflow_id: str) -> Workflow | None:
+        with self._lock:
+            workflow_row = self._conn.execute(
+                "SELECT * FROM workflows WHERE id=?", (workflow_id,)
+            ).fetchone()
+            if not workflow_row:
+                return None
+            status_rows = self._conn.execute(
+                "SELECT * FROM workflow_statuses WHERE workflow_id=? "
+                "ORDER BY position, key",
+                (workflow_id,),
+            ).fetchall()
+        return self._workflow_from_rows(workflow_row, status_rows)
+
+    def list_workflows(self) -> list[Workflow]:
+        with self._lock:
+            workflow_rows = self._conn.execute(
+                "SELECT * FROM workflows ORDER BY id"
+            ).fetchall()
+            status_rows = self._conn.execute(
+                "SELECT * FROM workflow_statuses ORDER BY workflow_id, position, key"
+            ).fetchall()
+        by_workflow: dict[str, list[sqlite3.Row]] = {}
+        for row in status_rows:
+            by_workflow.setdefault(row["workflow_id"], []).append(row)
+        return [
+            self._workflow_from_rows(workflow_row, by_workflow.get(workflow_row["id"], []))
+            for workflow_row in workflow_rows
+        ]
+
+    def get_project_workflow(self, project_id: str) -> Workflow:
+        """The project's workflow, or the built-in default as fallback."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT workflow_id FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+        workflow_id = row["workflow_id"] if row else None
+        workflow = self.get_workflow(workflow_id) if workflow_id else None
+        return workflow if workflow is not None else default_workflow()
+
+    def create_workflow(
+        self,
+        workflow_id: str,
+        name: str,
+        statuses: list[dict[str, Any]],
+    ) -> Workflow:
+        if not isinstance(workflow_id, str) or not WORKFLOW_ID_RE.fullmatch(workflow_id):
+            raise WorkflowError("workflow id must match ^[a-z][a-z0-9-]{0,31}$")
+        if not isinstance(name, str) or not name.strip():
+            raise WorkflowError("workflow name must be a non-empty string")
+        validated = validate_workflow_statuses(statuses)
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM workflows WHERE id=?", (workflow_id,)
+                ).fetchone()
+                if exists:
+                    raise ValueError(f"workflow {workflow_id!r} already exists")
+                self._conn.execute(
+                    "INSERT INTO workflows (id, name, settings_json, created_at) "
+                    "VALUES (?, ?, '{}', ?)",
+                    (workflow_id, name, _now()),
+                )
+                for status in validated:
+                    self._conn.execute(
+                        "INSERT INTO workflow_statuses "
+                        "(workflow_id, key, label, owner, position, active) "
+                        "VALUES (?, ?, ?, ?, ?, 1)",
+                        (
+                            workflow_id, status.key, status.label,
+                            status.owner, status.position,
+                        ),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        created = self.get_workflow(workflow_id)
+        assert created is not None
+        return created
+
+    def set_project_workflow(self, project_id: str, workflow_id: str) -> None:
+        """Assign a workflow to a project.
+
+        Rejected when existing tasks in the project use statuses that the
+        target workflow does not define — data is never rewritten.
+        """
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            raise ValueError(f"workflow {workflow_id!r} not found")
+        allowed = set(workflow.status_keys())
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                project_row = self._conn.execute(
+                    "SELECT 1 FROM projects WHERE id=?", (project_id,)
+                ).fetchone()
+                if not project_row:
+                    raise KeyError(project_id)
+                rows = self._conn.execute(
+                    "SELECT DISTINCT status FROM tasks WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+                unmappable = sorted(
+                    row["status"] for row in rows if row["status"] not in allowed
+                )
+                if unmappable:
+                    raise ValueError(
+                        f"cannot assign workflow {workflow_id!r}: tasks use "
+                        f"statuses not in it: {unmappable}"
+                    )
+                self._conn.execute(
+                    "UPDATE projects SET workflow_id=? WHERE id=?",
+                    (workflow_id, project_id),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _workflow_from_rows(
+        workflow_row: sqlite3.Row, status_rows: list[sqlite3.Row]
+    ) -> Workflow:
+        return Workflow(
+            id=workflow_row["id"],
+            name=workflow_row["name"],
+            statuses=tuple(
+                WorkflowStatus(
+                    key=row["key"],
+                    label=row["label"],
+                    owner=row["owner"],
+                    position=row["position"],
+                    active=bool(row["active"]),
+                )
+                for row in status_rows
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # Project sources (one source per project)
     # ------------------------------------------------------------------
 
@@ -754,6 +894,9 @@ class Store:
             archived=bool(row["archived"]),
             created_at=row["created_at"],
             path=row["path"] if "path" in row.keys() else None,
+            workflow_id=(
+                row["workflow_id"] if "workflow_id" in row.keys() else "default"
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -963,12 +1106,14 @@ class Store:
                         continue
                     self._conn.execute(
                         """INSERT INTO projects
-                           (id, name, color, icon, sort_order, archived, path, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                           (id, name, color, icon, sort_order, archived, path,
+                            workflow_id, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             project["id"], project["name"], project["color"],
                             project["icon"], project["sort_order"],
                             int(project["archived"]), project.get("path"),
+                            project.get("workflow_id", "default"),
                             project["created_at"],
                         ),
                     )

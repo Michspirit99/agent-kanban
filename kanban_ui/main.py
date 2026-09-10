@@ -36,7 +36,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from kanban_store import Store, STATUSES, status_meta
+from kanban_store import Store
 from kanban_store.snapshot_format import SnapshotFormatError
 from kanban_store.store import DEFAULT_PROJECT_ID, SnapshotImportConflict
 from kanban_ui.automation import (
@@ -210,6 +210,22 @@ class ProjectArchiveRequest(BaseModel):
     archived: bool = True
 
 
+class WorkflowStatusCreate(BaseModel):
+    key: str
+    label: str
+    owner: str = "any"
+
+
+class WorkflowCreate(BaseModel):
+    id: str
+    name: str
+    statuses: list[WorkflowStatusCreate]
+
+
+class ProjectWorkflowRequest(BaseModel):
+    workflow_id: str
+
+
 class SourcePlanLocalRequest(BaseModel):
     files: list[str] = Field(
         default_factory=list,
@@ -254,13 +270,14 @@ def index_for_project(project_id: str) -> str:
 
 @app.get("/api/board")
 def get_board(project: str = Query(DEFAULT_PROJECT_ID, description="project_id")) -> dict[str, Any]:
-    columns = status_meta()
     proj = _store.get_project(project)
     if proj is None:
         raise HTTPException(404, f"project {project} not found")
-    by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in STATUSES}
+    workflow = _store.get_project_workflow(project)
+    columns = workflow.columns()
+    by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in workflow.status_keys()}
     for t in _store.list_tasks(project_id=project):
-        by_status[t.status].append(
+        by_status.setdefault(t.status, []).append(
             {
                 "id": t.id,
                 "title": t.title,
@@ -584,6 +601,49 @@ def archive_project(project_id: str, req: ProjectArchiveRequest) -> dict[str, An
 
 
 # ---------------------------------------------------------------------------
+# Workflows (central registry)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/workflows")
+def list_workflows() -> dict[str, Any]:
+    return {"workflows": [w.to_public() for w in _store.list_workflows()]}
+
+
+@app.post("/api/workflows", status_code=201)
+def create_workflow(req: WorkflowCreate) -> dict[str, Any]:
+    if _store.get_workflow(req.id) is not None:
+        raise HTTPException(409, f"workflow {req.id} already exists")
+    try:
+        workflow = _store.create_workflow(
+            req.id, req.name, [s.model_dump() for s in req.statuses]
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return workflow.to_public()
+
+
+@app.get("/api/projects/{project_id}/workflow")
+def get_project_workflow(project_id: str) -> dict[str, Any]:
+    if _store.get_project(project_id) is None:
+        raise HTTPException(404, f"project {project_id} not found")
+    return {"workflow": _store.get_project_workflow(project_id).to_public()}
+
+
+@app.put("/api/projects/{project_id}/workflow")
+def assign_project_workflow(
+    project_id: str, req: ProjectWorkflowRequest
+) -> dict[str, Any]:
+    try:
+        _store.set_project_workflow(project_id, req.workflow_id)
+    except KeyError:
+        raise HTTPException(404, f"project {project_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "workflow": _store.get_project_workflow(project_id).to_public()}
+
+
+# ---------------------------------------------------------------------------
 # Single task
 # ---------------------------------------------------------------------------
 
@@ -605,11 +665,10 @@ def _project_payload(project_id: str | None) -> dict[str, Any] | None:
 
 @app.post("/api/tasks", status_code=201)
 async def create_task(req: TaskCreate) -> dict[str, Any]:
-    if req.status not in STATUSES:
-        raise HTTPException(400, f"unknown status: {req.status}")
     if _store.get_project(req.project_id) is None:
         raise HTTPException(400, f"unknown project: {req.project_id}")
-    t = _store.create_task(
+    try:
+        t = _store.create_task(
         title=req.title,
         description=req.description,
         acceptance=req.acceptance,
@@ -624,6 +683,8 @@ async def create_task(req: TaskCreate) -> dict[str, Any]:
         reporter=req.reporter,
         labels=req.labels or None,
     )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     await emit_event("task_created", {
         "task": t.to_public(),
         "project": _project_payload(t.project_id),
@@ -668,8 +729,6 @@ async def update_task(task_id: str, req: TaskUpdate) -> dict[str, Any]:
 
 @app.post("/api/tasks/{task_id}/move")
 async def move_task(task_id: str, req: MoveRequest) -> dict[str, Any]:
-    if req.to_status not in STATUSES:
-        raise HTTPException(400, f"unknown status: {req.to_status}")
     pre = _store.get_task(task_id)
     from_status = pre.status if pre else None
     try:
@@ -682,6 +741,8 @@ async def move_task(task_id: str, req: MoveRequest) -> dict[str, Any]:
         )
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     if from_status != req.to_status:    # only emit on an actual move
         payload = {
             "task": t.to_public(),

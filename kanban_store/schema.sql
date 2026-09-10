@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS projects (
     sort_order  INTEGER NOT NULL DEFAULT 0,          -- order in the project switcher
     archived    INTEGER NOT NULL DEFAULT 0,          -- 0/1
     path        TEXT,                                -- Claude Code project directory (optional)
+    workflow_id TEXT NOT NULL DEFAULT 'default',     -- workflow registry id
     created_at  TEXT NOT NULL                        -- ISO8601
 );
 
@@ -72,13 +73,46 @@ CREATE TABLE IF NOT EXISTS project_sources (
     created_at    TEXT NOT NULL
 );
 
+-- Central workflow registry (v6). The default workflow mirrors the original
+-- nine-column board; projects may override it via projects.workflow_id.
+CREATE TABLE IF NOT EXISTS workflows (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    settings_json TEXT NOT NULL DEFAULT '{}', -- reserved: claim/active-status config
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_statuses (
+    workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    key         TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    owner       TEXT NOT NULL DEFAULT 'any',  -- user | agent | any
+    position    INTEGER NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (workflow_id, key)
+);
+
+INSERT OR IGNORE INTO workflows (id, name, settings_json, created_at)
+    VALUES ('default', 'Default workflow', '{}', '2026-01-01T00:00:00+00:00');
+
+INSERT OR IGNORE INTO workflow_statuses (workflow_id, key, label, owner, position, active) VALUES
+    ('default', 'backlog',     'Backlog',     'user',  0, 1),
+    ('default', 'approved',    'Approved',    'agent', 1, 1),
+    ('default', 'analyst',     'Analyst',     'agent', 2, 1),
+    ('default', 'in_progress', 'In progress', 'agent', 3, 1),
+    ('default', 'testing',     'Testing',     'agent', 4, 1),
+    ('default', 'uat',         'UAT',         'user',  5, 1),
+    ('default', 'done',        'Done',        'user',  6, 1),
+    ('default', 'blocked',     'Blocked',     'any',   7, 1),
+    ('default', 'cancelled',   'Cancelled',   'user',  8, 1);
+
 -- meta for migrations
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '5');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '6');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('next_id', '1');
 
 -- Default project — read from env ``KANBAN_DEFAULT_PROJECT_ID`` / ``..._NAME``

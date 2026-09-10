@@ -17,7 +17,7 @@ from typing import Callable
 log = logging.getLogger("kanban.store.migrations")
 
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
-LATEST_VERSION = 5
+LATEST_VERSION = 6
 BUSY_TIMEOUT_MS = 5000
 
 MigrationFn = Callable[[sqlite3.Connection], None]
@@ -102,6 +102,24 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE tasks SET updated_at = created_at WHERE updated_at IS NULL")
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """v5 → v6: projects.workflow_id for the central workflow registry.
+
+    Workflow tables and the default-workflow seed are created by the
+    schema.sql baseline (idempotent ``IF NOT EXISTS`` / ``INSERT OR IGNORE``);
+    this migration only adds the project assignment column for existing
+    databases. All projects default to the 'default' workflow.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "workflow_id" not in cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN workflow_id TEXT NOT NULL DEFAULT 'default'"
+        )
+    conn.execute(
+        "UPDATE projects SET workflow_id='default' WHERE workflow_id IS NULL"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     (2, "tasks.project_id + default project bootstrap", _migrate_v2, True),
     (3, "projects.path", _migrate_v3, False),
@@ -112,6 +130,7 @@ MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
         _migrate_v5,
         False,
     ),
+    (6, "workflows + projects.workflow_id", _migrate_v6, False),
 ]
 
 

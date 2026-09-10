@@ -36,8 +36,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from kanban_store import Store, STATUSES, status_meta
+from kanban_store import Store
 from kanban_store.store import DEFAULT_PROJECT_ID
+from kanban_store.workflows import default_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -70,12 +71,24 @@ mcp = FastMCP("agent-kanban")
 
 
 @mcp.tool()
-def kanban_columns() -> dict[str, Any]:
+def kanban_columns(project_id: str | None = None) -> dict[str, Any]:
     """Describe every kanban column and who moves cards in/out of it.
 
     Call this at the start of a session to understand the current status model.
+
+    Args:
+        project_id: project slug; None = the default workflow.
     """
-    return _ok({"columns": status_meta(), "statuses": STATUSES})
+    try:
+        if project_id:
+            if _get_store().get_project(project_id) is None:
+                return _err(f"project {project_id} not found")
+            workflow = _get_store().get_project_workflow(project_id)
+        else:
+            workflow = default_workflow()
+    except Exception as e:
+        return _err(str(e))
+    return _ok({"columns": workflow.columns(), "statuses": workflow.status_keys()})
 
 
 def _short_task(t: Any) -> dict[str, Any]:
@@ -157,11 +170,12 @@ def kanban_board(project_id: str) -> dict[str, Any]:
         if proj is None:
             return _err(f"project {project_id} not found")
         tasks = _get_store().list_tasks(project_id=project_id)
+        workflow = _get_store().get_project_workflow(project_id)
     except Exception as e:
         return _err(str(e))
-    by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in STATUSES}
+    by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in workflow.status_keys()}
     for t in tasks:
-        by_status[t.status].append(_short_task(t))
+        by_status.setdefault(t.status, []).append(_short_task(t))
     summary = {
         "project": {"id": proj.id, "name": proj.name, "path": proj.path},
         "total": len(tasks),
@@ -170,7 +184,7 @@ def kanban_board(project_id: str) -> dict[str, Any]:
                 "count": len(by_status[s]),
                 "first_5": by_status[s][:5],
             }
-            for s in STATUSES if by_status[s]
+            for s in by_status if by_status[s]
         },
     }
     return _ok(summary)
@@ -269,8 +283,6 @@ def kanban_move(
         comment: optional comment, recorded in history.
         actor: claude / agent:<name>; defaults to claude.
     """
-    if to_status not in STATUSES:
-        return _err(f"unknown status: {to_status}; valid: {STATUSES}")
     try:
         t = _get_store().move_task(task_id, to_status, actor=actor, comment=comment)
     except KeyError:
@@ -329,8 +341,6 @@ def kanban_create(
         reporter: who reported the issue.
         labels: list of label strings.
     """
-    if status not in STATUSES:
-        return _err(f"unknown status: {status}")
     pid = project_id or os.environ.get("KANBAN_PROJECT_ID") or DEFAULT_PROJECT_ID
     try:
         t = _get_store().create_task(

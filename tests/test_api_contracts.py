@@ -31,7 +31,7 @@ STATUS_ORDER = [
 
 PROJECT_KEYS = {
     "id", "name", "color", "icon", "sort_order", "archived",
-    "created_at", "path", "task_counts", "total_tasks",
+    "created_at", "path", "task_counts", "total_tasks", "workflow_id",
 }
 
 
@@ -131,7 +131,8 @@ def test_task_lifecycle_contract(api_client):
 
 
 def test_error_contract(api_client):
-    client, _ = api_client
+    client, db = api_client
+    db.create_task("Move target")
 
     missing = client.get("/api/tasks/T-999")
     assert missing.status_code == 404
