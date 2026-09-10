@@ -17,7 +17,7 @@ from typing import Callable
 log = logging.getLogger("kanban.store.migrations")
 
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
-LATEST_VERSION = 6
+LATEST_VERSION = 7
 BUSY_TIMEOUT_MS = 5000
 
 MigrationFn = Callable[[sqlite3.Connection], None]
@@ -120,6 +120,15 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """v6 → v7: issue_events outbox for transactional event recording.
+
+    The table and pending index are created by the schema.sql baseline; this
+    migration exists so existing databases record the version bump and new
+    databases created before the baseline included the table stay consistent.
+    """
+
+
 MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     (2, "tasks.project_id + default project bootstrap", _migrate_v2, True),
     (3, "projects.path", _migrate_v3, False),
@@ -131,6 +140,7 @@ MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
         False,
     ),
     (6, "workflows + projects.workflow_id", _migrate_v6, False),
+    (7, "issue_events outbox", _migrate_v7, False),
 ]
 
 

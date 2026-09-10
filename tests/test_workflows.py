@@ -69,7 +69,7 @@ def test_fresh_store_seeds_default_workflow_and_assigns_projects(store):
     assert store.get_project_workflow("default").status_keys() == STATUS_ORDER
 
 
-def test_v4_legacy_database_migrates_to_v6_with_workflow(tmp_path):
+def test_v4_legacy_database_migrates_to_latest_with_workflow(tmp_path):
     path = tmp_path / "legacy-v4.db"
     conn = sqlite3.connect(path)
     conn.executescript(V4_SCHEMA)
@@ -81,7 +81,7 @@ def test_v4_legacy_database_migrates_to_v6_with_workflow(tmp_path):
         version = store._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
-        assert version == "6"
+        assert version == "7"
         assert store.get_task("T-001") is not None
         assert store.get_project("default").workflow_id == "default"
         assert store.get_project_workflow("default").status_keys() == STATUS_ORDER

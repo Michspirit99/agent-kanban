@@ -13,7 +13,7 @@ from typing import Any, Final, NoReturn
 # Keep it at 2; the two explicit version fields remove its old ambiguity.
 LEGACY_SCHEMA_VERSION: Final = 2
 SNAPSHOT_VERSION: Final = 1
-DATABASE_SCHEMA_VERSION: Final = 6
+DATABASE_SCHEMA_VERSION: Final = 7
 
 # Descriptive aliases make the supported versions clear to callers while the
 # short names above remain convenient for constructing a snapshot.

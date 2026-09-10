@@ -40,14 +40,14 @@ from kanban_store import Store
 from kanban_store.snapshot_format import SnapshotFormatError
 from kanban_store.store import DEFAULT_PROJECT_ID, SnapshotImportConflict
 from kanban_ui.automation import (
+    EventDispatcher,
     InboxWatcher,
     RuleEngine,
+    events_status,
     inbox_status,
     rules_status,
-    emit_rule_event,
     init_dispatcher,
     shutdown_dispatcher,
-    emit_event,
     webhooks_status,
     plan_md,
 )
@@ -94,25 +94,40 @@ def _webhooks_file() -> Path:
     )
 
 
+def _event_dispatcher_default_interval() -> float:
+    from kanban_ui.automation.event_dispatcher import DEFAULT_INTERVAL
+
+    return DEFAULT_INTERVAL
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Starts background tasks: inbox watcher + rule engine + webhook dispatcher."""
+    """Starts background tasks: inbox watcher + rule engine + webhook + event dispatcher."""
     KANBAN_DATA.mkdir(parents=True, exist_ok=True)
     inbox = InboxWatcher(_store, _inbox_dir())
     engine = RuleEngine(_store, _rules_file())
     init_dispatcher(_webhooks_file())
+    event_interval = float(
+        os.environ.get(
+            "KANBAN_EVENT_POLL_INTERVAL",
+            str(_event_dispatcher_default_interval()),
+        )
+    )
+    event_dispatcher = EventDispatcher(_store, interval=event_interval)
     inbox_task = asyncio.create_task(inbox.run(), name="inbox-watcher")
     rules_task = asyncio.create_task(engine.run(), name="rule-engine")
+    events_task = asyncio.create_task(event_dispatcher.run(), name="event-dispatcher")
     log.info(
-        "automation: inbox=%s rules=%s webhooks=%s",
-        _inbox_dir(), _rules_file(), _webhooks_file(),
+        "automation: inbox=%s rules=%s webhooks=%s events(interval=%ss)",
+        _inbox_dir(), _rules_file(), _webhooks_file(), event_interval,
     )
     try:
         yield
     finally:
         inbox.stop()
         engine.stop()
-        await asyncio.gather(inbox_task, rules_task, return_exceptions=True)
+        event_dispatcher.stop()
+        await asyncio.gather(inbox_task, rules_task, events_task, return_exceptions=True)
         await shutdown_dispatcher()
 
 
@@ -656,13 +671,6 @@ def get_task(task_id: str) -> dict[str, Any]:
     return t.to_public()
 
 
-def _project_payload(project_id: str | None) -> dict[str, Any] | None:
-    if not project_id:
-        return None
-    p = _store.get_project(project_id)
-    return p.to_public() if p else None
-
-
 @app.post("/api/tasks", status_code=201)
 async def create_task(req: TaskCreate) -> dict[str, Any]:
     if _store.get_project(req.project_id) is None:
@@ -685,10 +693,6 @@ async def create_task(req: TaskCreate) -> dict[str, Any]:
     )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    await emit_event("task_created", {
-        "task": t.to_public(),
-        "project": _project_payload(t.project_id),
-    })
     return t.to_public()
 
 
@@ -710,27 +714,11 @@ async def update_task(task_id: str, req: TaskUpdate) -> dict[str, Any]:
         )
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
-    changed = [
-        f for f, v in (
-            ("title", req.title), ("description", req.description),
-            ("acceptance", req.acceptance), ("priority", req.priority),
-            ("size", req.size), ("external_blocker", req.external_blocker),
-            ("issue_type", req.issue_type), ("reporter", req.reporter),
-            ("labels", req.labels),
-        ) if v is not None
-    ]
-    await emit_event("task_updated", {
-        "task": t.to_public(),
-        "project": _project_payload(t.project_id),
-        "changed_fields": changed,
-    })
     return t.to_public()
 
 
 @app.post("/api/tasks/{task_id}/move")
 async def move_task(task_id: str, req: MoveRequest) -> dict[str, Any]:
-    pre = _store.get_task(task_id)
-    from_status = pre.status if pre else None
     try:
         t = _store.move_task(
             task_id,
@@ -743,16 +731,6 @@ async def move_task(task_id: str, req: MoveRequest) -> dict[str, Any]:
         raise HTTPException(404, f"task {task_id} not found")
     except ValueError as e:
         raise HTTPException(400, str(e))
-    if from_status != req.to_status:    # only emit on an actual move
-        payload = {
-            "task": t.to_public(),
-            "project": _project_payload(t.project_id),
-            "from_status": from_status,
-            "to_status": req.to_status,
-            "comment": req.comment,
-        }
-        await emit_event("task_moved", payload)
-        emit_rule_event("task_moved", payload)
     return t.to_public()
 
 
@@ -762,13 +740,6 @@ async def add_comment(task_id: str, req: CommentRequest) -> dict[str, Any]:
         _store.add_comment(task_id, req.text, actor=_actor())
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
-    t = _store.get_task(task_id)
-    if t:
-        await emit_event("task_commented", {
-            "task": t.to_public(),
-            "project": _project_payload(t.project_id),
-            "comment": req.text,
-        })
     return {"ok": True}
 
 
@@ -829,11 +800,12 @@ def import_snapshot(req: SnapshotImportRequest) -> dict[str, Any]:
 
 @app.get("/api/automation/status")
 def get_automation_status() -> dict[str, Any]:
-    """State of the inbox watcher, rule engine, and webhook dispatcher."""
+    """State of the inbox watcher, rule engine, webhook + event dispatchers."""
     return {
         "inbox": inbox_status(),
         "rules": rules_status(),
         "webhooks": webhooks_status(),
+        "events": events_status(),
     }
 
 

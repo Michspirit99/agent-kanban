@@ -30,6 +30,14 @@ from .migrations import BUSY_TIMEOUT_MS, apply_migrations
 from .models import DEFAULT_PROJECT_ID, Issue, TaskHistory
 from .snapshot_format import normalize_snapshot
 from .snapshot_io import write_json_atomic
+from .events import (
+    AUTOMATION_ACTOR,
+    EVENT_TYPES,
+    task_commented_payload,
+    task_created_payload,
+    task_moved_payload,
+    task_updated_payload,
+)
 from .workflows import (
     WORKFLOW_ID_RE,
     Workflow,
@@ -46,6 +54,24 @@ Task = Issue
 
 class SnapshotImportConflict(ValueError):
     """Raised when imported durable data conflicts with an existing row."""
+
+
+class _EventSuppression:
+    """Context manager: skip outbox event recording (bulk imports).
+
+    Reentrant-safe: the previous suppression state is restored on exit.
+    """
+
+    def __init__(self, store: "Store"):
+        self._store = store
+        self._previous = False
+
+    def __enter__(self) -> None:
+        self._previous = self._store._events_suppressed
+        self._store._events_suppressed = True
+
+    def __exit__(self, *exc: object) -> None:
+        self._store._events_suppressed = self._previous
 
 # ============================================================================
 # Status model — derived from the central workflow registry (see
@@ -127,6 +153,9 @@ class Store:
         # Explicit (rather than relying on sqlite3.connect's default timeout)
         # so concurrent UI/MCP processes wait instead of failing fast.
         self._conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        # Outbox suppression flag (see events_suppressed). Per-instance: only
+        # the process performing a bulk import suppresses its own events.
+        self._events_suppressed = False
         self._migrate()
 
     # ------------------------------------------------------------------
@@ -294,6 +323,14 @@ class Store:
                     """,
                     (tid, ts, actor, status, None),
                 )
+                task, project = self._event_subjects(tid, project_id)
+                self._record_event(
+                    "task_created",
+                    task_id=tid,
+                    project_id=project_id,
+                    actor=actor,
+                    payload=task_created_payload(task, project),
+                )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -346,6 +383,17 @@ class Store:
                        VALUES (?, ?, ?, 'move', ?, ?, ?)""",
                     (task_id, ts, actor, from_status, to_status, comment),
                 )
+                if from_status != to_status:
+                    task, project = self._event_subjects(task_id, project_id)
+                    self._record_event(
+                        "task_moved",
+                        task_id=task_id,
+                        project_id=project_id,
+                        actor=actor,
+                        payload=task_moved_payload(
+                            task, project, from_status, to_status, comment
+                        ),
+                    )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -432,6 +480,16 @@ class Store:
                        VALUES (?, ?, ?, 'move', ?, ?, 'pulled')""",
                     (task_id, ts, assignee, claim_from, claim_to),
                 )
+                task, project = self._event_subjects(task_id, row["project_id"])
+                self._record_event(
+                    "task_moved",
+                    task_id=task_id,
+                    project_id=row["project_id"],
+                    actor=assignee,
+                    payload=task_moved_payload(
+                        task, project, claim_from, claim_to, "pulled"
+                    ),
+                )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -443,17 +501,31 @@ class Store:
     def add_comment(self, task_id: str, text: str, *, actor: str) -> None:
         ts = _now()
         with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM tasks WHERE id=?", (task_id,)
-            ).fetchone()
-            if not row:
-                raise KeyError(task_id)
-            self._conn.execute(
-                """INSERT INTO task_history
-                   (task_id, ts, actor, action, from_status, to_status, comment)
-                   VALUES (?, ?, ?, 'comment', NULL, NULL, ?)""",
-                (task_id, ts, actor, text),
-            )
+            self._conn.execute("BEGIN")
+            try:
+                row = self._conn.execute(
+                    "SELECT project_id FROM tasks WHERE id=?", (task_id,)
+                ).fetchone()
+                if not row:
+                    raise KeyError(task_id)
+                self._conn.execute(
+                    """INSERT INTO task_history
+                       (task_id, ts, actor, action, from_status, to_status, comment)
+                       VALUES (?, ?, ?, 'comment', NULL, NULL, ?)""",
+                    (task_id, ts, actor, text),
+                )
+                task, project = self._event_subjects(task_id, row["project_id"])
+                self._record_event(
+                    "task_commented",
+                    task_id=task_id,
+                    project_id=row["project_id"],
+                    actor=actor,
+                    payload=task_commented_payload(task, project, text),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def add_link(self, task_id: str, type_: str, value: str) -> None:
         with self._lock:
@@ -553,7 +625,7 @@ class Store:
             self._conn.execute("BEGIN")
             try:
                 row = self._conn.execute(
-                    "SELECT 1 FROM tasks WHERE id=?", (task_id,)
+                    "SELECT project_id FROM tasks WHERE id=?", (task_id,)
                 ).fetchone()
                 if not row:
                     raise KeyError(task_id)
@@ -565,6 +637,14 @@ class Store:
                        (task_id, ts, actor, action, from_status, to_status, comment)
                        VALUES (?, ?, ?, 'update', NULL, NULL, ?)""",
                     (task_id, ts, actor, ", ".join(changed)),
+                )
+                task, project = self._event_subjects(task_id, row["project_id"])
+                self._record_event(
+                    "task_updated",
+                    task_id=task_id,
+                    project_id=row["project_id"],
+                    actor=actor,
+                    payload=task_updated_payload(task, project, changed),
                 )
                 self._conn.execute("COMMIT")
             except Exception:
@@ -580,6 +660,107 @@ class Store:
             self._conn.execute(
                 "UPDATE tasks SET column_order=? WHERE id=?", (new_order, task_id)
             )
+
+    # ------------------------------------------------------------------
+    # Event outbox (Phase 3.1)
+    # ------------------------------------------------------------------
+
+    def _event_subjects(
+        self, task_id: str, project_id: str | None
+    ) -> tuple[Task | None, Any]:
+        """In-transaction task + project for event payloads (sees own writes)."""
+        task_row = self._conn.execute(
+            "SELECT * FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        task = self._row_to_task(task_row, eager_links=True) if task_row else None
+        project = None
+        if project_id:
+            prow = self._conn.execute(
+                "SELECT * FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            if prow:
+                project = self._row_to_project(prow)
+        return task, project
+
+    def _record_event(
+        self,
+        event_type: str,
+        *,
+        task_id: str | None,
+        project_id: str | None,
+        actor: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Record an outbox event inside the caller's transaction.
+
+        Skipped for automation mutations (rule actions must not recurse
+        through the outbox) and while ``events_suppressed()`` is active
+        (bulk imports must not storm webhooks).
+        """
+        if actor == AUTOMATION_ACTOR or self._events_suppressed:
+            return
+        if event_type not in EVENT_TYPES:
+            return
+        self._conn.execute(
+            """INSERT INTO issue_events
+               (event_type, task_id, project_id, actor, payload_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                event_type,
+                task_id,
+                project_id,
+                actor,
+                json.dumps(payload, ensure_ascii=False),
+                _now(),
+            ),
+        )
+
+    def events_suppressed(self) -> _EventSuppression:
+        """Context manager: suppress event recording inside the block."""
+        return _EventSuppression(self)
+
+    def list_pending_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Undelivered outbox events, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM issue_events WHERE delivered_at IS NULL "
+                "ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except json.JSONDecodeError:
+                payload = {}
+            result.append(
+                {
+                    "id": row["id"],
+                    "event_type": row["event_type"],
+                    "task_id": row["task_id"],
+                    "project_id": row["project_id"],
+                    "actor": row["actor"],
+                    "payload": payload,
+                    "created_at": row["created_at"],
+                    "delivered_at": row["delivered_at"],
+                }
+            )
+        return result
+
+    def mark_event_delivered(self, event_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE issue_events SET delivered_at=? WHERE id=?",
+                (_now(), event_id),
+            )
+
+    def schema_version(self) -> int:
+        """Recorded schema version of this database (0 if absent)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+        return int(row["value"]) if row else 0
 
     # ------------------------------------------------------------------
     # Projects

@@ -743,7 +743,7 @@ paths:
   /api/automation/status:
     get:
       summary: Get Automation Status
-      description: State of the inbox watcher, rule engine, and webhook dispatcher.
+      description: State of the inbox watcher, rule engine, webhook + event dispatchers.
       operationId: get_automation_status_api_automation_status_get
       responses:
         '200':

@@ -108,13 +108,27 @@ INSERT OR IGNORE INTO workflow_statuses (workflow_id, key, label, owner, positio
     ('default', 'blocked',     'Blocked',     'any',   7, 1),
     ('default', 'cancelled',   'Cancelled',   'user',  8, 1);
 
+CREATE TABLE IF NOT EXISTS issue_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type   TEXT NOT NULL,
+    task_id      TEXT,
+    project_id   TEXT,
+    actor        TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    delivered_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_events_pending
+    ON issue_events(delivered_at, id);
+
 -- meta for migrations
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '6');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '7');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('next_id', '1');
 
 -- Default project — read from env ``KANBAN_DEFAULT_PROJECT_ID`` / ``..._NAME``

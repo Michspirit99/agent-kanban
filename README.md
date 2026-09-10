@@ -33,6 +33,7 @@ Toggle theme with `t`, cycle profiles with `p`. Or pin a theme/profile via URL: 
 - PLAN.md import (loose-mode parser): any `## Section` → cards in backlog with section-name in description.
 - Automation rules (`kanban_data/rules.json`): `task_idle: status=done, days=14 → move_to cancelled`, etc. Hot-reloaded.
 - **Outbound webhooks** (`kanban_data/webhooks.json`): POST to Slack / Telegram / any HTTP endpoint on `task_created`/`task_moved`/`task_commented`/`task_updated`. 3 formats: `generic`, `slack`, `telegram`.
+- **Durable event outbox**: every mutation — REST, MCP, inbox, or any client writing to the database — is recorded in SQLite in the same transaction and delivered by a background dispatcher (poll interval `KANBAN_EVENT_POLL_INTERVAL`). Webhooks and reactive rules fire consistently no matter which client made the change. Mutations by the rule engine itself (`actor=automation`) and PLAN.md imports are excluded to prevent recursion and notification storms.
 - **MCP server** (`kanban_mcp/`) with 14 tools for Claude Code / Cline (project-aware: `kanban_projects`, `kanban_board`, `kanban_search`, `kanban_my_active`).
 - **REST API + auto-generated OpenAPI** for opencode / Open WebUI / any LLM with function calling.
 
@@ -134,6 +135,7 @@ Real-world flows: [`docs/USECASES.md`](docs/USECASES.md) — 11 use cases (solo 
 | `KANBAN_RULES_FILE` | `<repo>/kanban_data/rules.json` | automation rules |
 | `KANBAN_WEBHOOKS_FILE` | `<repo>/kanban_data/webhooks.json` | outbound webhook notifications |
 | `KANBAN_AUTOMATION_INTERVAL` | `60` | rule engine interval (sec) |
+| `KANBAN_EVENT_POLL_INTERVAL` | `1` | event dispatcher poll interval (sec) |
 | `KANBAN_INBOX_INTERVAL` | `5` | inbox poll interval (sec) |
 | `KANBAN_CORS_ORIGINS` | (empty) | comma-separated origins for CORS (e.g. for remote Open WebUI) |
 | `KANBAN_PROJECT_ID` | (empty) | for MCP server: default project_id when agent calls `kanban_create` without one |
