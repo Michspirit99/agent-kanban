@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field, asdict
@@ -25,7 +26,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .snapshot_format import normalize_snapshot
+from .snapshot_io import write_json_atomic
+
 DEFAULT_PROJECT_ID = os.environ.get("KANBAN_DEFAULT_PROJECT_ID", "default")
+
+
+class SnapshotImportConflict(ValueError):
+    """Raised when imported durable data conflicts with an existing row."""
 
 # ============================================================================
 # Status model
@@ -805,15 +813,112 @@ class Store:
     # ------------------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        """Dump the whole board as a plain dict for JSON persistence."""
-        tasks = self.list_tasks()
-        projects = self.list_projects(include_archived=True)
-        return {
-            "exported_at": _now(),
-            "schema_version": 2,
-            "projects": [p.to_public() for p in projects],
-            "tasks": [t.to_public() for t in tasks],
-        }
+        """Dump the whole board as a plain dict for JSON persistence.
+
+        The explicit read transaction keeps the project, task, relation, and
+        history queries on one SQLite snapshot.  Keeping all queries under the
+        Store lock also prevents this Store's writers from interleaving with
+        the export.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                schema_row = self._conn.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                ).fetchone()
+                database_schema_version = int(schema_row["value"]) if schema_row else 0
+
+                project_rows = self._conn.execute(
+                    "SELECT * FROM projects ORDER BY sort_order, name"
+                ).fetchall()
+                count_rows = self._conn.execute(
+                    "SELECT project_id, status, COUNT(*) AS n "
+                    "FROM tasks GROUP BY project_id, status"
+                ).fetchall()
+                task_rows = self._conn.execute(
+                    "SELECT * FROM tasks ORDER BY status, column_order, id"
+                ).fetchall()
+                link_rows = self._conn.execute(
+                    "SELECT task_id, type, value FROM task_links "
+                    "ORDER BY task_id, type, value"
+                ).fetchall()
+                blocker_rows = self._conn.execute(
+                    "SELECT task_id, blocker_id FROM task_blockers "
+                    "ORDER BY task_id, blocker_id"
+                ).fetchall()
+                history_rows = self._conn.execute(
+                    "SELECT * FROM task_history ORDER BY task_id, ts ASC, id ASC"
+                ).fetchall()
+
+                counts: dict[str, dict[str, int]] = {}
+                totals: dict[str, int] = {}
+                for row in count_rows:
+                    counts.setdefault(row["project_id"], {})[row["status"]] = row["n"]
+                    totals[row["project_id"]] = totals.get(row["project_id"], 0) + row["n"]
+
+                links: dict[str, list[dict[str, str]]] = {}
+                for row in link_rows:
+                    links.setdefault(row["task_id"], []).append(
+                        {"type": row["type"], "value": row["value"]}
+                    )
+                blockers: dict[str, list[str]] = {}
+                for row in blocker_rows:
+                    blockers.setdefault(row["task_id"], []).append(row["blocker_id"])
+                histories: dict[str, list[dict[str, Any]]] = {}
+                for row in history_rows:
+                    histories.setdefault(row["task_id"], []).append(
+                        {
+                            "id": row["id"],
+                            "task_id": row["task_id"],
+                            "ts": row["ts"],
+                            "actor": row["actor"],
+                            "action": row["action"],
+                            "from_status": row["from_status"],
+                            "to_status": row["to_status"],
+                            "comment": row["comment"],
+                        }
+                    )
+
+                projects: list[dict[str, Any]] = []
+                for row in project_rows:
+                    project = self._row_to_project(row)
+                    project.task_counts = counts.get(project.id, {})
+                    project.total_tasks = totals.get(project.id, 0)
+                    projects.append(project.to_public())
+
+                tasks: list[dict[str, Any]] = []
+                for row in task_rows:
+                    task = self._row_to_task(row)
+                    task.links = links.get(task.id, [])
+                    task.blockers = blockers.get(task.id, [])
+                    task.history = [
+                        TaskHistory(
+                            id=entry["id"],
+                            task_id=entry["task_id"],
+                            ts=entry["ts"],
+                            actor=entry["actor"],
+                            action=entry["action"],
+                            from_status=entry["from_status"],
+                            to_status=entry["to_status"],
+                            comment=entry["comment"],
+                        )
+                        for entry in histories.get(task.id, [])
+                    ]
+                    tasks.append(task.to_public())
+
+                result = {
+                    "exported_at": _now(),
+                    "schema_version": 2,
+                    "snapshot_version": 1,
+                    "database_schema_version": database_schema_version,
+                    "projects": projects,
+                    "tasks": tasks,
+                }
+                self._conn.execute("COMMIT")
+                return result
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def save_snapshot(self, dest_dir: str | Path | None = None) -> Path:
         if dest_dir is None:
@@ -822,11 +927,185 @@ class Store:
         dest_dir.mkdir(parents=True, exist_ok=True)
         date_part = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         fp = dest_dir / f"{date_part}.json"
-        fp.write_text(
-            json.dumps(self.snapshot(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        return write_json_atomic(fp, self.snapshot())
+
+    def import_snapshot(self, payload: Any) -> dict[str, int]:
+        """Add the durable rows in a normalized snapshot to this Store.
+
+        Existing rows are left untouched.  A row with the same durable
+        identity and different values is a conflict; all such checks happen
+        before any insert in the transaction.
+        """
+        snapshot = normalize_snapshot(payload)
+        self._validate_import_relations(snapshot)
+
+        projects = snapshot["projects"]
+        tasks = snapshot["tasks"]
+        history = [entry for task in tasks for entry in task["history"]]
+        max_imported_id = max(
+            (
+                int(match.group(1))
+                for task in tasks
+                if (match := re.fullmatch(r"T-(\d+)", task["id"]))
+            ),
+            default=0,
         )
-        return fp
+
+        inserted = {"projects": 0, "tasks": 0, "links": 0, "blockers": 0, "history": 0}
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                existing_projects = {
+                    row["id"]: row
+                    for row in self._conn.execute("SELECT * FROM projects").fetchall()
+                }
+                existing_tasks = {
+                    row["id"]: row
+                    for row in self._conn.execute("SELECT * FROM tasks").fetchall()
+                }
+                existing_history = {
+                    row["id"]: row
+                    for row in self._conn.execute("SELECT * FROM task_history").fetchall()
+                }
+
+                for project in projects:
+                    current = existing_projects.get(project["id"])
+                    if current is not None:
+                        self._check_project_conflict(current, project)
+                task_columns = (
+                    "id", "title", "status", "priority", "size", "assignee",
+                    "description", "acceptance", "external_blocker", "created_at",
+                    "moved_at", "column_order", "project_id",
+                )
+                for task in tasks:
+                    current = existing_tasks.get(task["id"])
+                    if current is not None and any(
+                        current[column] != task[column] for column in task_columns
+                    ):
+                        raise SnapshotImportConflict(
+                            f"task {task['id']!r} conflicts with existing durable data"
+                        )
+                history_columns = (
+                    "id", "task_id", "ts", "actor", "action",
+                    "from_status", "to_status", "comment",
+                )
+                for entry in history:
+                    current = existing_history.get(entry["id"])
+                    if current is not None and any(
+                        current[column] != entry[column] for column in history_columns
+                    ):
+                        raise SnapshotImportConflict(
+                            f"history {entry['id']!r} conflicts with existing durable data"
+                        )
+
+                for project in projects:
+                    if project["id"] in existing_projects:
+                        continue
+                    self._conn.execute(
+                        """INSERT INTO projects
+                           (id, name, color, icon, sort_order, archived, path, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            project["id"], project["name"], project["color"],
+                            project["icon"], project["sort_order"],
+                            int(project["archived"]), project.get("path"),
+                            project["created_at"],
+                        ),
+                    )
+                    inserted["projects"] += 1
+
+                for task in tasks:
+                    if task["id"] in existing_tasks:
+                        continue
+                    self._conn.execute(
+                        """INSERT INTO tasks
+                           (id, title, status, priority, size, assignee,
+                            description, acceptance, external_blocker,
+                            created_at, moved_at, column_order, project_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        tuple(task[column] for column in task_columns),
+                    )
+                    inserted["tasks"] += 1
+
+                for task in tasks:
+                    for link in task["links"]:
+                        cursor = self._conn.execute(
+                            "INSERT OR IGNORE INTO task_links (task_id, type, value) "
+                            "VALUES (?, ?, ?)",
+                            (task["id"], link["type"], link["value"]),
+                        )
+                        inserted["links"] += cursor.rowcount
+                    for blocker_id in task["blockers"]:
+                        cursor = self._conn.execute(
+                            "INSERT OR IGNORE INTO task_blockers (task_id, blocker_id) "
+                            "VALUES (?, ?)", (task["id"], blocker_id)
+                        )
+                        inserted["blockers"] += cursor.rowcount
+                    for entry in task["history"]:
+                        if entry["id"] in existing_history:
+                            continue
+                        self._conn.execute(
+                            """INSERT INTO task_history
+                               (id, task_id, ts, actor, action, from_status,
+                                to_status, comment)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            tuple(entry[column] for column in history_columns),
+                        )
+                        inserted["history"] += 1
+
+                next_id_row = self._conn.execute(
+                    "SELECT value FROM meta WHERE key='next_id'"
+                ).fetchone()
+                current_next_id = int(next_id_row["value"]) if next_id_row else 1
+                next_id = max(current_next_id, max_imported_id + 1)
+                if next_id_row and next_id != current_next_id:
+                    self._conn.execute(
+                        "UPDATE meta SET value=? WHERE key='next_id'", (str(next_id),)
+                    )
+                elif not next_id_row:
+                    self._conn.execute(
+                        "INSERT INTO meta (key, value) VALUES ('next_id', ?)",
+                        (str(next_id),),
+                    )
+                self._conn.execute("COMMIT")
+                return inserted
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _validate_import_relations(snapshot: dict[str, Any]) -> None:
+        """Reject duplicate durable relation identities before opening writes."""
+        history_ids: set[int] = set()
+        link_ids: set[tuple[str, str, str]] = set()
+        for task in snapshot["tasks"]:
+            for link in task["links"]:
+                identity = (task["id"], link["type"], link["value"])
+                if identity in link_ids:
+                    raise ValueError(f"duplicate link {identity!r} in snapshot")
+                link_ids.add(identity)
+            for entry in task["history"]:
+                if entry["id"] in history_ids:
+                    raise ValueError(
+                        f"duplicate history id {entry['id']!r} in snapshot"
+                    )
+                history_ids.add(entry["id"])
+
+    @staticmethod
+    def _check_project_conflict(current: sqlite3.Row, project: dict[str, Any]) -> None:
+        columns = ("id", "name", "color", "icon", "sort_order", "archived", "created_at")
+        if any(
+            (bool(current[column]) if column == "archived" else current[column])
+            != project[column]
+            for column in columns
+        ):
+            raise SnapshotImportConflict(
+                f"project {project['id']!r} conflicts with existing durable data"
+            )
+        if "path" in project and current["path"] != project["path"]:
+            raise SnapshotImportConflict(
+                f"project {project['id']!r} conflicts with existing durable data"
+            )
 
     # ------------------------------------------------------------------
     # Helpers
