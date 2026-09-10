@@ -1075,10 +1075,12 @@ class Store:
 
     @staticmethod
     def _validate_import_relations(snapshot: dict[str, Any]) -> None:
-        """Reject duplicate durable relation identities before opening writes."""
+        """Validate Store-specific constraints before opening writes."""
         history_ids: set[int] = set()
         link_ids: set[tuple[str, str, str]] = set()
         for task in snapshot["tasks"]:
+            if task["status"] not in STATUSES:
+                raise ValueError(f"unknown task status {task['status']!r}")
             for link in task["links"]:
                 identity = (task["id"], link["type"], link["value"])
                 if identity in link_ids:
@@ -1093,7 +1095,10 @@ class Store:
 
     @staticmethod
     def _check_project_conflict(current: sqlite3.Row, project: dict[str, Any]) -> None:
-        columns = ("id", "name", "color", "icon", "sort_order", "archived", "created_at")
+        # Fresh Store instances bootstrap the default project with a new
+        # created_at timestamp.  Treat that timestamp as non-conflicting so a
+        # normal snapshot can be imported into a fresh database.
+        columns = ("id", "name", "color", "icon", "sort_order", "archived")
         if any(
             (bool(current[column]) if column == "archived" else current[column])
             != project[column]

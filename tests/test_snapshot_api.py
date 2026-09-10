@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,9 +11,8 @@ from kanban_ui import main
 
 @pytest.fixture
 def api_client(monkeypatch, tmp_path):
+    # Keep the production bootstrap row to cover imports into a fresh Store.
     db = Store(tmp_path / "api.db")
-    # Import tests use a genuinely empty target rather than the bootstrap row.
-    db._conn.execute("DELETE FROM projects WHERE id='default'")
     monkeypatch.setattr(main, "_store", db)
     monkeypatch.setenv("KANBAN_INBOX_DIR", str(tmp_path / "inbox"))
     monkeypatch.setenv("KANBAN_RULES_FILE", str(tmp_path / "rules.json"))
@@ -41,6 +42,23 @@ def test_snapshot_import_is_described_in_openapi():
     assert operation["requestBody"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/SnapshotImportRequest"
     }
+
+
+def test_snapshot_endpoint_returns_path_and_valid_json(api_client, tmp_path, monkeypatch):
+    client, db = api_client
+    destination = tmp_path / "snapshot.json"
+
+    def save_snapshot():
+        destination.write_text(json.dumps(db.snapshot()), encoding="utf-8")
+        return destination
+
+    monkeypatch.setattr(db, "save_snapshot", save_snapshot)
+
+    response = client.post("/api/snapshot")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "path": str(destination)}
+    assert json.loads(destination.read_text(encoding="utf-8"))["schema_version"] == 2
 
 
 def test_import_snapshot_returns_report_and_restores_data(api_client, snapshot):

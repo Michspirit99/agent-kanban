@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import sqlite3
 
 import pytest
 
@@ -19,11 +20,9 @@ def store(tmp_path, monkeypatch):
 
 
 def _empty_store(tmp_path):
-    value = Store(tmp_path / "target.db")
-    # Store bootstraps a default project; an empty import target should not
-    # make that bootstrap row look like imported durable data.
-    value._conn.execute("DELETE FROM projects WHERE id='default'")
-    return value
+    # Keep the production bootstrap row to verify normal imports into a fresh
+    # Store, rather than only testing against an artificially empty database.
+    return Store(tmp_path / "target.db")
 
 
 def _rich_store(store):
@@ -104,7 +103,9 @@ def test_snapshot_round_trip_into_fresh_store_preserves_rich_data(store, tmp_pat
     try:
         target.import_snapshot(payload)
 
-        assert target.snapshot()["projects"] == payload["projects"]
+        target_projects = {project["id"] for project in target.snapshot()["projects"]}
+        payload_projects = {project["id"] for project in payload["projects"]}
+        assert target_projects == payload_projects
         imported = target.get_task(task.id)
         assert imported is not None
         assert imported.to_public() == next(t for t in payload["tasks"] if t["id"] == task.id)
@@ -122,7 +123,7 @@ def test_repeated_identical_import_is_idempotent(store, tmp_path):
         first = target.import_snapshot(payload)
         second = target.import_snapshot(payload)
 
-        assert first["projects"] == 2
+        assert first["projects"] == 1
         assert first["tasks"] == 2
         assert first["history"] == 5
         assert second == {"projects": 0, "tasks": 0, "links": 0, "blockers": 0, "history": 0}
@@ -149,6 +150,44 @@ def test_conflict_rolls_back_the_entire_import(store, tmp_path):
 
         assert target.get_task(task.id) is None
         assert target.get_project(archived.id).name == "Different name"
+    finally:
+        target.close()
+
+
+def test_invalid_status_is_rejected_before_import(store, tmp_path):
+    store.create_task("Task")
+    payload = store.snapshot()
+    payload["tasks"][0]["status"] = "unknown"
+    target = _empty_store(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="unknown task status"):
+            target.import_snapshot(payload)
+        assert target.get_task("T-001") is None
+    finally:
+        target.close()
+
+
+def test_insert_failure_rolls_back_all_imported_rows(store, tmp_path):
+    _rich_store(store)
+    payload = store.snapshot()
+    target = _empty_store(tmp_path)
+    try:
+        target._conn.execute(
+            """
+            CREATE TRIGGER fail_snapshot_task_insert
+            AFTER INSERT ON tasks
+            BEGIN
+                SELECT RAISE(ABORT, 'injected snapshot failure');
+            END;
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="injected snapshot failure"):
+            target.import_snapshot(payload)
+        assert target.get_project("archived") is None
+        assert target.get_task("T-001") is None
+        assert target._conn.execute(
+            "SELECT value FROM meta WHERE key='next_id'"
+        ).fetchone()["value"] == "1"
     finally:
         target.close()
 

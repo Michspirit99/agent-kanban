@@ -730,7 +730,13 @@ def snapshot() -> dict[str, Any]:
     return {"ok": True, "path": str(fp)}
 
 
-@app.post("/api/snapshot/import")
+@app.post(
+    "/api/snapshot/import",
+    responses={
+        400: {"description": "Malformed or unsupported snapshot"},
+        409: {"description": "Snapshot conflicts with existing data"},
+    },
+)
 def import_snapshot(req: SnapshotImportRequest) -> dict[str, Any]:
     try:
         report = _store.import_snapshot(req.snapshot)

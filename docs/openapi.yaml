@@ -634,6 +634,10 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Import Snapshot Api Snapshot Import Post
+        '400':
+          description: Malformed or unsupported snapshot
+        '409':
+          description: Snapshot conflicts with existing data
         '422':
           description: Validation Error
           content:
