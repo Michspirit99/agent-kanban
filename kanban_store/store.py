@@ -37,6 +37,7 @@ from .workflows import (
     WorkflowStatus,
     default_workflow,
     validate_workflow_statuses,
+    workflow_settings,
 )
 
 # ``Task`` is the historical public name; ``Issue`` is the canonical model.
@@ -381,9 +382,11 @@ class Store:
         return t
 
     def pull_task(self, task_id: str, assignee: str = "claude") -> Task:
-        """Atomic: assignee IS NULL → assignee, status approved → analyst.
+        """Atomic claim: assignee IS NULL → assignee, claim_from → claim_to.
 
-        Used by Claude/an agent for a safe "claim the task" operation.
+        The claim transition comes from the task's project workflow settings
+        (default workflow: approved → analyst). Used by agents for a safe
+        "claim the task" operation.
         """
         ts = _now()
         with self._lock:
@@ -394,31 +397,40 @@ class Store:
                 ).fetchone()
                 if not row:
                     raise KeyError(task_id)
+                workflow = self.get_project_workflow(row["project_id"])
+                settings = workflow_settings(workflow)
+                claim_from = settings["claim_from"]
+                claim_to = settings["claim_to"]
+                workflow_keys = set(workflow.status_keys())
+                if claim_from not in workflow_keys or claim_to not in workflow_keys:
+                    raise ValueError(
+                        f"workflow {workflow.id!r} settings reference unknown statuses"
+                    )
                 if row["assignee"] is not None and row["assignee"] != assignee:
                     raise RuntimeError(
                         f"task {task_id} already assigned to {row['assignee']}"
                     )
-                if row["status"] != "approved":
+                if row["status"] != claim_from:
                     raise RuntimeError(
-                        f"task {task_id} is in '{row['status']}', not 'approved'"
+                        f"task {task_id} is in '{row['status']}', not '{claim_from}'"
                     )
-                # move to analyst and claim (per project)
+                # move to claim_to and claim (per project)
                 r2 = self._conn.execute(
                     "SELECT COALESCE(MAX(column_order), -1) AS m FROM tasks "
-                    "WHERE status='analyst' AND project_id=?",
-                    (row["project_id"],),
+                    "WHERE status=? AND project_id=?",
+                    (claim_to, row["project_id"]),
                 ).fetchone()
                 col_order = (r2["m"] + 1) if r2 else 0
                 self._conn.execute(
-                    """UPDATE tasks SET status='analyst', assignee=?, moved_at=?, column_order=?
+                    """UPDATE tasks SET status=?, assignee=?, moved_at=?, column_order=?
                        WHERE id=?""",
-                    (assignee, ts, col_order, task_id),
+                    (claim_to, assignee, ts, col_order, task_id),
                 )
                 self._conn.execute(
                     """INSERT INTO task_history
                        (task_id, ts, actor, action, from_status, to_status, comment)
-                       VALUES (?, ?, ?, 'move', 'approved', 'analyst', 'pulled')""",
-                    (task_id, ts, assignee),
+                       VALUES (?, ?, ?, 'move', ?, ?, 'pulled')""",
+                    (task_id, ts, assignee, claim_from, claim_to),
                 )
                 self._conn.execute("COMMIT")
             except Exception:
@@ -821,6 +833,11 @@ class Store:
                     active=bool(row["active"]),
                 )
                 for row in status_rows
+            ),
+            settings=(
+                json.loads(workflow_row["settings_json"])
+                if workflow_row["settings_json"]
+                else {}
             ),
         )
 

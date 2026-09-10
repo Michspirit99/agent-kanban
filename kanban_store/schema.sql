@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS workflow_statuses (
 );
 
 INSERT OR IGNORE INTO workflows (id, name, settings_json, created_at)
-    VALUES ('default', 'Default workflow', '{}', '2026-01-01T00:00:00+00:00');
+    VALUES ('default', 'Default workflow',
+            '{"claim_from": "approved", "claim_to": "analyst", "active_statuses": ["analyst", "in_progress", "testing"]}',
+            '2026-01-01T00:00:00+00:00');
 
 INSERT OR IGNORE INTO workflow_statuses (workflow_id, key, label, owner, position, active) VALUES
     ('default', 'backlog',     'Backlog',     'user',  0, 1),

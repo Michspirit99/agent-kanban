@@ -8,12 +8,23 @@ Store and the API layer.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 WORKFLOW_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 STATUS_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 VALID_OWNERS = {"user", "agent", "any"}
+
+# Fallback claim/active-status semantics for workflows without explicit
+# settings (mirrors the original agent workflow).
+DEFAULT_CLAIM_FROM = "approved"
+DEFAULT_CLAIM_TO = "analyst"
+DEFAULT_ACTIVE_STATUSES = ["analyst", "in_progress", "testing"]
+DEFAULT_WORKFLOW_SETTINGS: dict[str, Any] = {
+    "claim_from": DEFAULT_CLAIM_FROM,
+    "claim_to": DEFAULT_CLAIM_TO,
+    "active_statuses": list(DEFAULT_ACTIVE_STATUSES),
+}
 
 
 class WorkflowError(ValueError):
@@ -34,6 +45,7 @@ class Workflow:
     id: str
     name: str
     statuses: tuple[WorkflowStatus, ...]
+    settings: dict[str, Any] = field(default_factory=dict)
 
     def status_keys(self) -> list[str]:
         return [status.key for status in self.statuses]
@@ -62,6 +74,7 @@ class Workflow:
                 }
                 for status in self.statuses
             ],
+            "settings": workflow_settings(self),
         }
 
 
@@ -88,7 +101,26 @@ def default_workflow() -> Workflow:
             WorkflowStatus(key=key, label=label, owner=owner, position=position)
             for position, (key, label, owner) in enumerate(DEFAULT_STATUS_DEFINITIONS)
         ),
+        settings=dict(DEFAULT_WORKFLOW_SETTINGS),
     )
+
+
+def workflow_settings(workflow: Workflow) -> dict[str, Any]:
+    """Workflow settings with safe defaults filled in.
+
+    Recognized keys: ``claim_from``/``claim_to`` (the agent claim transition
+    used by ``pull_task``) and ``active_statuses`` (statuses counted as
+    active work, e.g. by MCP ``kanban_my_active``).
+    """
+    settings = dict(workflow.settings or {})
+    settings.setdefault("claim_from", DEFAULT_CLAIM_FROM)
+    settings.setdefault("claim_to", DEFAULT_CLAIM_TO)
+    active = settings.get("active_statuses")
+    if not isinstance(active, list) or not all(
+        isinstance(status, str) for status in active
+    ):
+        settings["active_statuses"] = list(DEFAULT_ACTIVE_STATUSES)
+    return settings
 
 
 def validate_workflow_statuses(raw: list[dict[str, Any]]) -> list[WorkflowStatus]:
@@ -124,7 +156,11 @@ def validate_workflow_statuses(raw: list[dict[str, Any]]) -> list[WorkflowStatus
 
 
 __all__ = [
+    "DEFAULT_ACTIVE_STATUSES",
+    "DEFAULT_CLAIM_FROM",
+    "DEFAULT_CLAIM_TO",
     "DEFAULT_STATUS_DEFINITIONS",
+    "DEFAULT_WORKFLOW_SETTINGS",
     "STATUS_KEY_RE",
     "VALID_OWNERS",
     "WORKFLOW_ID_RE",
@@ -133,4 +169,5 @@ __all__ = [
     "WorkflowStatus",
     "default_workflow",
     "validate_workflow_statuses",
+    "workflow_settings",
 ]

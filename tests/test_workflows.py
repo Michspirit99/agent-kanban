@@ -13,7 +13,12 @@ from fastapi.testclient import TestClient
 
 from kanban_mcp import server as mcp_server
 from kanban_store import Store, status_meta
-from kanban_store.workflows import WorkflowError, default_workflow
+from kanban_store.workflows import (
+    Workflow,
+    WorkflowError,
+    default_workflow,
+    workflow_settings,
+)
 from kanban_ui import main
 from tests.test_issue_model import V4_SCHEMA
 
@@ -158,8 +163,13 @@ def test_rest_workflow_endpoints(api_client):
     assert listed.status_code == 200
     first = listed.json()["workflows"][0]
     assert first["id"] == "default"
-    assert set(first) == {"id", "name", "statuses"}
+    assert set(first) == {"id", "name", "statuses", "settings"}
     assert set(first["statuses"][0]) == {"key", "label", "owner", "position", "active"}
+    assert first["settings"]["claim_from"] == "approved"
+    assert first["settings"]["claim_to"] == "analyst"
+    assert first["settings"]["active_statuses"] == [
+        "analyst", "in_progress", "testing",
+    ]
 
     created = client.post("/api/workflows", json={
         "id": "lean",
@@ -204,3 +214,116 @@ def test_mcp_columns_match_board_for_project(store, monkeypatch):
     assert columns["ok"] is True
     assert [c["id"] for c in columns["data"]["columns"]] == STATUS_ORDER
     assert columns["data"]["statuses"] == STATUS_ORDER
+
+
+# ---------------------------------------------------------------------------
+# Workflow settings: claim + active-status semantics
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_settings_defaults():
+    settings = workflow_settings(default_workflow())
+
+    assert settings["claim_from"] == "approved"
+    assert settings["claim_to"] == "analyst"
+    assert settings["active_statuses"] == ["analyst", "in_progress", "testing"]
+
+
+def test_workflow_settings_fill_missing_values():
+    custom = Workflow(
+        id="x",
+        name="X",
+        statuses=(),
+        settings={"claim_from": "in_progress"},
+    )
+
+    settings = workflow_settings(custom)
+
+    assert settings["claim_from"] == "in_progress"
+    assert settings["claim_to"] == "analyst"
+    assert settings["active_statuses"] == ["analyst", "in_progress", "testing"]
+
+
+def test_pull_task_uses_workflow_claim_settings(store):
+    store.create_project("qaflow", "QA Flow")
+    store.create_workflow("qaflow-wf", "QA workflow", [
+        {"key": "todo", "label": "To do", "owner": "user"},
+        {"key": "qa_done", "label": "QA Done", "owner": "user"},
+    ])
+    store._conn.execute(
+        "UPDATE workflows SET settings_json=? WHERE id='qaflow-wf'",
+        ('{"claim_from": "todo", "claim_to": "qa_done"}',),
+    )
+    store.set_project_workflow("qaflow", "qaflow-wf")
+    task = store.create_task("Claim me", status="todo", project_id="qaflow")
+
+    pulled = store.pull_task(task.id, assignee="claude")
+
+    assert pulled.status == "qa_done"
+    assert pulled.assignee == "claude"
+    history = pulled.history[-1]
+    assert (history.from_status, history.to_status) == ("todo", "qa_done")
+
+
+def test_pull_task_rejects_wrong_claim_status(store):
+    store.create_project("qaflow", "QA Flow")
+    store.create_workflow("qaflow-wf", "QA workflow", [
+        {"key": "todo", "label": "To do", "owner": "user"},
+        {"key": "qa_done", "label": "QA Done", "owner": "user"},
+    ])
+    store._conn.execute(
+        "UPDATE workflows SET settings_json=? WHERE id='qaflow-wf'",
+        ('{"claim_from": "todo", "claim_to": "qa_done"}',),
+    )
+    store.set_project_workflow("qaflow", "qaflow-wf")
+    task = store.create_task("Not claimable", status="qa_done", project_id="qaflow")
+
+    with pytest.raises(RuntimeError, match="not 'todo'"):
+        store.pull_task(task.id)
+
+
+def test_default_pull_remains_approved_to_analyst(store):
+    task = store.create_task("Classic")
+    store.move_task(task.id, "approved")
+
+    pulled = store.pull_task(task.id)
+
+    assert pulled.status == "analyst"
+    history = pulled.history[-1]
+    assert (history.from_status, history.to_status) == ("approved", "analyst")
+
+
+def test_mcp_my_active_uses_workflow_active_statuses(store, monkeypatch):
+    monkeypatch.setattr(mcp_server, "_store", store)
+    store.create_project("qaflow", "QA Flow")
+    store.create_workflow("qaflow-wf", "QA workflow", [
+        {"key": "todo", "label": "To do", "owner": "user"},
+        {"key": "qa_done", "label": "QA Done", "owner": "user"},
+    ])
+    store._conn.execute(
+        "UPDATE workflows SET settings_json=? WHERE id='qaflow-wf'",
+        ('{"active_statuses": ["qa_done"]}',),
+    )
+    store.set_project_workflow("qaflow", "qaflow-wf")
+    active_task = store.create_task(
+        "Working", status="qa_done", assignee="claude", project_id="qaflow"
+    )
+    store.create_task("Idle", status="todo", project_id="qaflow")
+
+    result = mcp_server.kanban_my_active(project_id="qaflow")
+
+    assert result["ok"] is True
+    ids = [t["id"] for t in result["data"]["tasks"]]
+    assert ids == [active_task.id]
+
+
+def test_mcp_my_active_default_workflow_unchanged(store, monkeypatch):
+    monkeypatch.setattr(mcp_server, "_store", store)
+    task = store.create_task("One", assignee="claude")
+    store.move_task(task.id, "testing")
+    store.create_task("Backlogged", assignee="claude")
+
+    result = mcp_server.kanban_my_active()
+
+    assert result["ok"] is True
+    assert [t["id"] for t in result["data"]["tasks"]] == ["T-001"]

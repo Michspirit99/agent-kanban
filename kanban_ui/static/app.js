@@ -18,6 +18,23 @@ const STATUS_TITLE = {
   cancelled: "Cancelled",
 };
 
+// Label for a status key, preferring the project's workflow columns
+// (custom workflows) and falling back to the default map, then the raw key.
+function statusLabel(key) {
+  const columns = (state.board && state.board.columns) || [];
+  const col = columns.find((c) => c.id === key);
+  if (col) return col.title;
+  return STATUS_TITLE[key] || key;
+}
+
+// Status options for the new-task modal: the project's workflow columns.
+function statusOptions() {
+  const columns = (state.board && state.board.columns && state.board.columns.length)
+    ? state.board.columns
+    : Object.entries(STATUS_TITLE).map(([id, title]) => ({ id, title }));
+  return columns;
+}
+
 const LS = {
   DENSITY: "kb.density",
   SIDEBAR: "kb.sidebar",
@@ -415,7 +432,7 @@ async function handleDrop(evt) {
       to_status: toStatus,
       column_order: newOrder,
     });
-    toast(`${taskId} → ${STATUS_TITLE[toStatus] || toStatus}`);
+    toast(`${taskId} → ${statusLabel(toStatus)}`);
     await loadBoard();
     await loadProjects();
   } catch (e) {
@@ -436,7 +453,7 @@ async function openTaskModal(taskId) {
   }
   $("#modal").dataset.taskId = t.id;
   $("#m-id").textContent = t.id;
-  $("#m-status").textContent = STATUS_TITLE[t.status] || t.status;
+  $("#m-status").textContent = statusLabel(t.status);
   $("#m-title").value = t.title || "";
   $("#m-priority").value = t.priority || "normal";
   $("#m-size").value = t.size || "M";
@@ -551,7 +568,15 @@ function openNewModal() {
   $("#n-acceptance").value = "";
   $("#n-priority").value = "normal";
   $("#n-size").value = "M";
-  $("#n-status").value = "backlog";
+  const statusSelect = $("#n-status");
+  statusSelect.innerHTML = "";
+  for (const col of statusOptions()) {
+    const option = document.createElement("option");
+    option.value = col.id;
+    option.textContent = col.title;
+    statusSelect.appendChild(option);
+  }
+  statusSelect.value = statusOptions()[0].id;
   $("#n-proj-chip").textContent = state.project ? state.project.name : state.projectId;
   $("#new-modal").hidden = false;
   $("#n-title").focus();

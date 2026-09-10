@@ -38,7 +38,7 @@ from mcp.server.fastmcp import FastMCP
 
 from kanban_store import Store
 from kanban_store.store import DEFAULT_PROJECT_ID
-from kanban_store.workflows import default_workflow
+from kanban_store.workflows import default_workflow, workflow_settings
 
 
 # ---------------------------------------------------------------------------
@@ -218,19 +218,30 @@ def kanban_my_active(
     assignee: str = "claude",
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Active tasks for the given assignee — in analyst/in_progress/testing.
+    """Active tasks for the given assignee, per the project's workflow.
+
+    Active statuses come from the project workflow's ``active_statuses``
+    setting (default workflow: analyst/in_progress/testing). Without a
+    project_id, the default workflow's active statuses are used.
 
     Perfect as the first query of a session: "what am I working on right now?"
 
     Args:
         assignee: claude (default), agent:<name>, user, ...
-        project_id: project slug; None = all projects.
+        project_id: project slug; None = all projects (default workflow
+                    active statuses).
     """
     try:
         tasks = _get_store().list_tasks(assignee=assignee, project_id=project_id)
+        workflow = (
+            _get_store().get_project_workflow(project_id)
+            if project_id
+            else default_workflow()
+        )
+        active_statuses = set(workflow_settings(workflow)["active_statuses"])
     except Exception as e:
         return _err(str(e))
-    active = [t for t in tasks if t.status in ("analyst", "in_progress", "testing")]
+    active = [t for t in tasks if t.status in active_statuses]
     return _ok({
         "tasks": [_short_task(t) for t in active],
         "count": len(active),
