@@ -312,6 +312,34 @@ def get_board(project: str = Query(DEFAULT_PROJECT_ID, description="project_id")
     }
 
 
+@app.get("/api/search")
+def search_tasks(
+    q: str,
+    project: str | None = None,
+    mode: str = "fts",
+) -> dict[str, Any]:
+    """Search tasks across title, description, and acceptance criteria.
+
+    Mode ``fts`` (default) uses the SQLite FTS5 index with prefix matching
+    (``data`` matches ``database``) and falls back to substring matching
+    when FTS5 is unavailable. Mode ``substring`` is the legacy literal
+    containment search. The response reports the effective mode.
+    """
+    if mode not in ("fts", "substring"):
+        raise HTTPException(400, f"unknown search mode {mode!r}")
+    effective = "fts" if (mode == "fts" and _store.fts_available) else "substring"
+    try:
+        hits = _store.search(q, project_id=project, mode=mode)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "query": q.strip(),
+        "mode": effective,
+        "count": len(hits),
+        "tasks": [t.to_public() for t in hits],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------

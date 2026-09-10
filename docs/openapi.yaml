@@ -68,6 +68,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/search:
+    get:
+      summary: Search Tasks
+      description: 'Search tasks across title, description, and acceptance criteria.
+
+
+        Mode ``fts`` (default) uses the SQLite FTS5 index with prefix matching
+
+        (``data`` matches ``database``) and falls back to substring matching
+
+        when FTS5 is unavailable. Mode ``substring`` is the legacy literal
+
+        containment search. The response reports the effective mode.'
+      operationId: search_tasks_api_search_get
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Q
+      - name: project
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project
+      - name: mode
+        in: query
+        required: false
+        schema:
+          type: string
+          default: fts
+          title: Mode
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Search Tasks Api Search Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/projects:
     get:
       summary: List Projects

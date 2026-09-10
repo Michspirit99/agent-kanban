@@ -36,6 +36,7 @@ Toggle theme with `t`, cycle profiles with `p`. Or pin a theme/profile via URL: 
 - **Durable event outbox**: every mutation — REST, MCP, inbox, or any client writing to the database — is recorded in SQLite in the same transaction and delivered by a background dispatcher (poll interval `KANBAN_EVENT_POLL_INTERVAL`). Webhooks and reactive rules fire consistently no matter which client made the change. Mutations by the rule engine itself (`actor=automation`) and PLAN.md imports are excluded to prevent recursion and notification storms.
 - **MCP server** (`kanban_mcp/`) with 14 tools for Claude Code / Cline (project-aware: `kanban_projects`, `kanban_board`, `kanban_search`, `kanban_my_active`).
 - **REST API + auto-generated OpenAPI** for opencode / Open WebUI / any LLM with function calling.
+- **Full-text search** (`GET /api/search?q=...`): FTS5 index over title, description, and acceptance criteria with prefix matching, kept in sync by triggers; falls back to substring search on SQLite builds without FTS5.
 
 ## Quickstart
 

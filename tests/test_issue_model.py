@@ -122,7 +122,7 @@ def test_v4_database_gains_issue_fields_preserving_data(tmp_path):
         version = store._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
-        assert version == "7"
+        assert version == "8"
 
         task = store.get_task("T-001")
         assert task.title == "Legacy v4 task"

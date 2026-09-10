@@ -122,13 +122,18 @@ CREATE TABLE IF NOT EXISTS issue_events (
 CREATE INDEX IF NOT EXISTS idx_issue_events_pending
     ON issue_events(delivered_at, id);
 
+-- Full-text search index (v8): external-content FTS5 table mirrored from
+-- tasks via triggers, plus sync triggers. The table is created by migration
+-- _migrate_v8 (which also backfills it), not here — so databases on SQLite
+-- builds without FTS5 can still open (migration records 'fts5'='off').
+
 -- meta for migrations
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '7');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '8');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('next_id', '1');
 
 -- Default project — read from env ``KANBAN_DEFAULT_PROJECT_ID`` / ``..._NAME``

@@ -81,7 +81,7 @@ def test_v4_legacy_database_migrates_to_latest_with_workflow(tmp_path):
         version = store._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
-        assert version == "7"
+        assert version == "8"
         assert store.get_task("T-001") is not None
         assert store.get_project("default").workflow_id == "default"
         assert store.get_project_workflow("default").status_keys() == STATUS_ORDER

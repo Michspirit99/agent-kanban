@@ -28,6 +28,7 @@ from typing import Any, Iterable
 
 from .migrations import BUSY_TIMEOUT_MS, apply_migrations
 from .models import DEFAULT_PROJECT_ID, Issue, TaskHistory
+from .searching import SEARCH_MODES, build_fts_query, validate_query
 from .snapshot_format import normalize_snapshot
 from .snapshot_io import write_json_atomic
 from .events import (
@@ -761,6 +762,73 @@ class Store:
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()
         return int(row["value"]) if row else 0
+
+    # ------------------------------------------------------------------
+    # Search (Phase 4.1)
+    # ------------------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        mode: str = "fts",
+    ) -> list[Task]:
+        """Search tasks by query; returns matches (oldest board order first).
+
+        Modes:
+        - ``fts``: FTS5 token search over title/description/acceptance with
+          prefix expansion (``data`` matches ``database``). Falls back to
+          substring matching when the FTS5 index is unavailable.
+        - ``substring``: case-insensitive substring over the same fields
+          (the original ``kanban_search`` semantics, extended to acceptance).
+        """
+        q = validate_query(query)
+        if mode not in SEARCH_MODES:
+            raise ValueError(f"unknown search mode {mode!r} (valid: {SEARCH_MODES})")
+        if mode == "fts" and self.fts_available:
+            return self._search_fts(q, project_id)
+        return self._search_substring(q, project_id)
+
+    @property
+    def fts_available(self) -> bool:
+        """Whether the FTS5 index exists and was successfully provisioned."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key='fts5'"
+            ).fetchone()
+            if row and row["value"] == "off":
+                return False
+            has_table = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='issues_fts'"
+            ).fetchone()
+        return has_table is not None
+
+    def _search_fts(self, q: str, project_id: str | None) -> list[Task]:
+        sql = """
+            SELECT tasks.* FROM issues_fts
+            JOIN tasks ON tasks.rowid = issues_fts.rowid
+            WHERE issues_fts MATCH ?
+        """
+        params: list[Any] = [build_fts_query(q)]
+        if project_id:
+            sql += " AND issues_fts.project_id = ?"
+            params.append(project_id)
+        sql += " ORDER BY rank, tasks.id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_task(r, eager_links=True) for r in rows]
+
+    def _search_substring(self, q: str, project_id: str | None) -> list[Task]:
+        needle = q.lower()
+        tasks = self.list_tasks(project_id=project_id)
+        return [
+            t
+            for t in tasks
+            if needle in t.title.lower()
+            or needle in (t.description or "").lower()
+            or needle in (t.acceptance or "").lower()
+        ]
 
     # ------------------------------------------------------------------
     # Projects

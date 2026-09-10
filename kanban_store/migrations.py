@@ -17,7 +17,7 @@ from typing import Callable
 log = logging.getLogger("kanban.store.migrations")
 
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
-LATEST_VERSION = 7
+LATEST_VERSION = 8
 BUSY_TIMEOUT_MS = 5000
 
 MigrationFn = Callable[[sqlite3.Connection], None]
@@ -129,6 +129,72 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     """
 
 
+_FTS_TABLE_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(
+    title, description, acceptance,
+    project_id UNINDEXED,
+    content='tasks', content_rowid='rowid'
+)
+"""
+
+_FTS_TRIGGER_SQL = (
+    """
+    CREATE TRIGGER IF NOT EXISTS issues_fts_ai AFTER INSERT ON tasks BEGIN
+        INSERT INTO issues_fts (rowid, title, description, acceptance, project_id)
+        VALUES (new.rowid, new.title, new.description, new.acceptance, new.project_id);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS issues_fts_ad AFTER DELETE ON tasks BEGIN
+        INSERT INTO issues_fts (issues_fts, rowid, title, description, acceptance, project_id)
+        VALUES ('delete', old.rowid, old.title, old.description, old.acceptance, old.project_id);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS issues_fts_au AFTER UPDATE ON tasks BEGIN
+        INSERT INTO issues_fts (issues_fts, rowid, title, description, acceptance, project_id)
+        VALUES ('delete', old.rowid, old.title, old.description, old.acceptance, old.project_id);
+        INSERT INTO issues_fts (rowid, title, description, acceptance, project_id)
+        VALUES (new.rowid, new.title, new.description, new.acceptance, new.project_id);
+    END
+    """,
+)
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """v7 → v8: FTS5 search index over tasks (graceful degradation).
+
+    Creates an external-content FTS5 table mirrored by triggers, then
+    backfills it from existing rows via the 'rebuild' command. On SQLite
+    builds without FTS5 the migration records ``fts5='off'`` in meta and
+    search falls back to substring matching — startup never fails over a
+    missing search index.
+
+    Registered with always_run=True (like v2): the schema.sql baseline
+    declares version 8 for fresh databases, so this migration must also
+    execute on them to provision the index. The meta guard makes repeated
+    runs a no-op.
+    """
+    already = conn.execute(
+        "SELECT value FROM meta WHERE key='fts5'"
+    ).fetchone()
+    if already:
+        return
+    try:
+        conn.execute(_FTS_TABLE_SQL)
+        for trigger_sql in _FTS_TRIGGER_SQL:
+            conn.execute(trigger_sql)
+        conn.execute("INSERT INTO issues_fts (issues_fts) VALUES ('rebuild')")
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('fts5', 'on')"
+        )
+    except sqlite3.OperationalError as e:
+        log.warning("FTS5 unavailable (%s); search falls back to substring", e)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('fts5', 'off')"
+        )
+
+
 MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     (2, "tasks.project_id + default project bootstrap", _migrate_v2, True),
     (3, "projects.path", _migrate_v3, False),
@@ -141,6 +207,7 @@ MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     ),
     (6, "workflows + projects.workflow_id", _migrate_v6, False),
     (7, "issue_events outbox", _migrate_v7, False),
+    (8, "issues_fts search index", _migrate_v8, True),
 ]
 
 
