@@ -25,7 +25,7 @@ Toggle theme with `t`, cycle profiles with `p`. Or pin a theme/profile via URL: 
 
 ## Features
 
-- 9 workflow columns: Backlog → Approved → Analyst → In progress → Testing → UAT → Done, plus Blocked / Cancelled.
+- 9 workflow columns: Backlog → Approved → Analyst → In progress → Testing → UAT → Done, plus Blocked / Cancelled. Each column has an owner (`user` / `agent` / `any`), and workflows can opt into owner enforcement via the `enforce_owners` workflow setting: agents (the rule engine, Claude Code, `agent:*` actors) can then only enter agent/any columns, humans only user/any columns. Default is off — everything behaves as before until you enable it.
 - Multiple projects in one DB, URL-routed (`/p/{slug}`), each with optional Claude Code-project directory binding.
 - Light/dark theme switcher (`t`), density toggle (`d`), collapsible columns, sidebar.
 - Search + filter chips, keyboard shortcuts (`/`, `n`, `r`, `\`, `Esc`).

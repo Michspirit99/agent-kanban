@@ -44,6 +44,7 @@ from .workflows import (
     Workflow,
     WorkflowError,
     WorkflowStatus,
+    actor_may_enter,
     default_workflow,
     validate_workflow_statuses,
     workflow_settings,
@@ -365,6 +366,16 @@ class Store:
                     raise ValueError(
                         f"unknown status {to_status!r} for project workflow {workflow.id!r}"
                     )
+                if not actor_may_enter(workflow, to_status, actor):
+                    status = next(
+                        s for s in workflow.statuses if s.key == to_status
+                    )
+                    raise ValueError(
+                        f"workflow {workflow.id!r} does not allow actor "
+                        f"{actor!r} to move tasks into {to_status!r} "
+                        f"(owner={status.owner}; workflow settings may "
+                        f"disable enforce_owners)"
+                    )
                 # column_order — append to the end of the project's column when not specified
                 if column_order is None:
                     r2 = self._conn.execute(
@@ -454,6 +465,15 @@ class Store:
                 if claim_from not in workflow_keys or claim_to not in workflow_keys:
                     raise ValueError(
                         f"workflow {workflow.id!r} settings reference unknown statuses"
+                    )
+                if not actor_may_enter(workflow, claim_to, assignee):
+                    target = next(
+                        s for s in workflow.statuses if s.key == claim_to
+                    )
+                    raise ValueError(
+                        f"workflow {workflow.id!r} does not allow actor "
+                        f"{assignee!r} to claim tasks into {claim_to!r} "
+                        f"(owner={target.owner})"
                     )
                 if row["assignee"] is not None and row["assignee"] != assignee:
                     raise RuntimeError(

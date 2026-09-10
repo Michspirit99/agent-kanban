@@ -20,11 +20,18 @@ VALID_OWNERS = {"user", "agent", "any"}
 DEFAULT_CLAIM_FROM = "approved"
 DEFAULT_CLAIM_TO = "analyst"
 DEFAULT_ACTIVE_STATUSES = ["analyst", "in_progress", "testing"]
+DEFAULT_ENFORCE_OWNERS = False
 DEFAULT_WORKFLOW_SETTINGS: dict[str, Any] = {
     "claim_from": DEFAULT_CLAIM_FROM,
     "claim_to": DEFAULT_CLAIM_TO,
     "active_statuses": list(DEFAULT_ACTIVE_STATUSES),
+    "enforce_owners": DEFAULT_ENFORCE_OWNERS,
 }
+
+# Actor prefixes classified as agents (rule engine, Claude Code, named agents).
+# Everything else is treated as a human user. Documented heuristic; name your
+# human actor anything outside these prefixes.
+_AGENT_ACTOR_PREFIXES = ("automation", "claude", "agent")
 
 
 class WorkflowError(ValueError):
@@ -109,8 +116,9 @@ def workflow_settings(workflow: Workflow) -> dict[str, Any]:
     """Workflow settings with safe defaults filled in.
 
     Recognized keys: ``claim_from``/``claim_to`` (the agent claim transition
-    used by ``pull_task``) and ``active_statuses`` (statuses counted as
-    active work, e.g. by MCP ``kanban_my_active``).
+    used by ``pull_task``), ``active_statuses`` (statuses counted as
+    active work, e.g. by MCP ``kanban_my_active``), and ``enforce_owners``
+    (opt-in transition enforcement against status owners).
     """
     settings = dict(workflow.settings or {})
     settings.setdefault("claim_from", DEFAULT_CLAIM_FROM)
@@ -120,7 +128,44 @@ def workflow_settings(workflow: Workflow) -> dict[str, Any]:
         isinstance(status, str) for status in active
     ):
         settings["active_statuses"] = list(DEFAULT_ACTIVE_STATUSES)
+    enforce = settings.get("enforce_owners")
+    if not isinstance(enforce, bool):
+        settings["enforce_owners"] = DEFAULT_ENFORCE_OWNERS
     return settings
+
+
+def actor_kind(actor: str) -> str:
+    """Classify an actor as ``"agent"`` or ``"user"``.
+
+    Agents: the rule engine (``automation``), Claude Code (``claude...``)
+    and named agents (``agent``, ``agent:<name>``). Everything else is a
+    human user.
+    """
+    a = (actor or "").strip().lower()
+    if a.startswith(_AGENT_ACTOR_PREFIXES):
+        return "agent"
+    return "user"
+
+
+def actor_may_enter(workflow: Workflow, to_status: str, actor: str) -> bool:
+    """Whether *actor* may move a task INTO ``to_status`` under *workflow*.
+
+    Enforcement is opt-in via the workflow's ``enforce_owners`` setting;
+    when off (the default) everything is allowed. When on, the target
+    status's owner must accept the actor's kind (``user``/``agent``;
+    ``any`` accepts both). Unknown statuses are denied here — the caller's
+    own validation reports them with a precise message.
+    """
+    settings = workflow_settings(workflow)
+    if not settings["enforce_owners"]:
+        return True
+    status = next((s for s in workflow.statuses if s.key == to_status), None)
+    if status is None:
+        return False
+    owner = status.owner
+    if owner == "any":
+        return True
+    return owner == actor_kind(actor)
 
 
 def validate_workflow_statuses(raw: list[dict[str, Any]]) -> list[WorkflowStatus]:
@@ -159,6 +204,7 @@ __all__ = [
     "DEFAULT_ACTIVE_STATUSES",
     "DEFAULT_CLAIM_FROM",
     "DEFAULT_CLAIM_TO",
+    "DEFAULT_ENFORCE_OWNERS",
     "DEFAULT_STATUS_DEFINITIONS",
     "DEFAULT_WORKFLOW_SETTINGS",
     "STATUS_KEY_RE",
@@ -167,6 +213,8 @@ __all__ = [
     "Workflow",
     "WorkflowError",
     "WorkflowStatus",
+    "actor_kind",
+    "actor_may_enter",
     "default_workflow",
     "validate_workflow_statuses",
     "workflow_settings",
