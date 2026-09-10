@@ -52,7 +52,7 @@ def test_apply_migrations_returns_latest_version(tmp_path):
 
     version = mig.apply_migrations(conn)
 
-    assert version == mig.LATEST_VERSION == 8
+    assert version == mig.LATEST_VERSION == 9
     conn.close()
 
 
@@ -79,7 +79,7 @@ def test_reopen_is_idempotent(tmp_path, monkeypatch):
             version = reopened._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()["value"]
-            assert version == "8"
+            assert version == "9"
             assert len(reopened.list_tasks()) == 1
             assert reopened._conn.execute(
                 "SELECT value FROM meta WHERE key='next_id'"
@@ -116,7 +116,7 @@ def test_failing_migration_rolls_back_version_and_data(tmp_path):
         version = store._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
-        assert version == "8"
+        assert version == "9"
     finally:
         store.close()
 

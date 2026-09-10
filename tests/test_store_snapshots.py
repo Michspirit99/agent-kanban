@@ -241,7 +241,7 @@ def test_import_advances_next_id_without_changing_schema_version(store, tmp_path
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
 
-        assert before == after == "8"
+        assert before == after == "9"
         assert target._conn.execute(
             "SELECT value FROM meta WHERE key='next_id'"
         ).fetchone()["value"] == "43"

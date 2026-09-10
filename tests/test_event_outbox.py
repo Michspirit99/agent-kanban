@@ -60,8 +60,8 @@ def events(store: Store, event_type: str | None = None) -> list[dict[str, Any]]:
 
 
 def test_outbox_schema_and_version(store):
-    assert LATEST_VERSION == 8
-    assert store.schema_version() == 8
+    assert LATEST_VERSION == 9
+    assert store.schema_version() == 9
     tables = {
         r["name"]
         for r in store._conn.execute(
@@ -76,7 +76,7 @@ def test_schema_reopen_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("KANBAN_DEFAULT_PROJECT_NAME", "Default")
     Store(tmp_path / "reopen.db").close()
     store = Store(tmp_path / "reopen.db")
-    assert store.schema_version() == 8
+    assert store.schema_version() == 9
 
 
 # ---------------------------------------------------------------------------

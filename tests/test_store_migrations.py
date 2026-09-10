@@ -16,7 +16,7 @@ def test_fresh_database_is_initialized_idempotently(monkeypatch, tmp_path):
         version = first._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
-        assert version == "8"
+        assert version == "9"
     finally:
         first.close()
 
@@ -77,6 +77,6 @@ def test_v1_database_migrates_without_losing_tasks(monkeypatch, tmp_path):
         assert store.get_project("legacy").name == "Legacy"
         assert store._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()["value"] == "8"
+        ).fetchone()["value"] == "9"
     finally:
         store.close()

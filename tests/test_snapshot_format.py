@@ -115,7 +115,7 @@ def test_rejects_unsupported_future_snapshot_version():
 
 def test_rejects_unsupported_future_database_version():
     raw = _snapshot()
-    raw["database_schema_version"] = 9
+    raw["database_schema_version"] = 10
 
     with pytest.raises(SnapshotFormatError):
         normalize_snapshot(raw)

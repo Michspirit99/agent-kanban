@@ -96,9 +96,9 @@ def test_search_rejects_unknown_mode(store):
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_8(store):
-    assert LATEST_VERSION == 8
-    assert store.schema_version() == 8
+def test_schema_version_tracks_latest(store):
+    assert LATEST_VERSION == 9
+    assert store.schema_version() == 9
 
 
 def test_search_fts_token_prefix_matches(store):
@@ -163,7 +163,7 @@ def test_migration_v8_backfills_existing_rows(tmp_path, monkeypatch):
     db_path = tmp_path / "legacy.db"
     conn = sqlite3.connect(str(db_path))
     # stop at v7 (no FTS table, no triggers), insert a task, then upgrade
-    apply_migrations(conn, migrations=MIGRATIONS[:-1])
+    apply_migrations(conn, migrations=MIGRATIONS[:-2])
     conn.execute(
         """INSERT INTO tasks (id, title, status, priority, size, assignee,
                                description, acceptance, external_blocker,
@@ -180,7 +180,7 @@ def test_migration_v8_backfills_existing_rows(tmp_path, monkeypatch):
 
     store = Store(db_path)
     try:
-        assert store.schema_version() == 8
+        assert store.schema_version() == 9
         assert [t.id for t in store.search("haystack")] == ["T-001"]
         assert [t.id for t in store.search("needle")] == ["T-001"]
     finally:

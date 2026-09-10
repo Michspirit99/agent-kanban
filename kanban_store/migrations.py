@@ -17,7 +17,7 @@ from typing import Callable
 log = logging.getLogger("kanban.store.migrations")
 
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
-LATEST_VERSION = 8
+LATEST_VERSION = 9
 BUSY_TIMEOUT_MS = 5000
 
 MigrationFn = Callable[[sqlite3.Connection], None]
@@ -195,6 +195,56 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """v8 → v9: reparent orphaned tasks to the default project.
+
+    Legacy databases can contain tasks whose project_id has no matching
+    project (the column predates project validation). Such tasks render on
+    no board and are invisible. This migration re-anchors them to the
+    default project (env ``KANBAN_DEFAULT_PROJECT_ID``, same as v2's seed),
+    creating it first if the database has no such project. Each repaired
+    task is appended to the end of its column so existing board order is
+    preserved.
+
+    Registered with always_run=True: fresh databases already satisfy the
+    invariant and the orphan probe makes repeated runs a cheap no-op.
+    """
+    orphans = conn.execute(
+        "SELECT t.id FROM tasks t "
+        "LEFT JOIN projects p ON p.id = t.project_id "
+        "WHERE p.id IS NULL"
+    ).fetchall()
+    if not orphans:
+        return
+    default_id = os.environ.get("KANBAN_DEFAULT_PROJECT_ID", "default")
+    default_name = os.environ.get("KANBAN_DEFAULT_PROJECT_NAME", "Default")
+    default_color = os.environ.get("KANBAN_DEFAULT_PROJECT_COLOR", "#F10D30")
+    default_icon = os.environ.get(
+        "KANBAN_DEFAULT_PROJECT_ICON", default_name[:1].upper()
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO projects (id, name, color, icon, sort_order, "
+        "archived, created_at) VALUES (?, ?, ?, ?, 0, 0, ?)",
+        (default_id, default_name, default_color, default_icon, _now()),
+    )
+    for (task_id,) in orphans:
+        status = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()[0]
+        next_order = conn.execute(
+            "SELECT COALESCE(MAX(column_order), -1) + 1 AS o FROM tasks "
+            "WHERE project_id=? AND status=?",
+            (default_id, status),
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE tasks SET project_id=?, column_order=? WHERE id=?",
+            (default_id, next_order, task_id),
+        )
+    log.warning(
+        "reparented %d orphaned task(s) to project %r", len(orphans), default_id
+    )
+
+
 MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     (2, "tasks.project_id + default project bootstrap", _migrate_v2, True),
     (3, "projects.path", _migrate_v3, False),
@@ -208,6 +258,7 @@ MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     (6, "workflows + projects.workflow_id", _migrate_v6, False),
     (7, "issue_events outbox", _migrate_v7, False),
     (8, "issues_fts search index", _migrate_v8, True),
+    (9, "orphaned task repair", _migrate_v9, True),
 ]
 
 
