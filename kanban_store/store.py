@@ -46,6 +46,7 @@ from .workflows import (
     WorkflowStatus,
     actor_may_enter,
     default_workflow,
+    transition_allowed,
     validate_workflow_statuses,
     workflow_settings,
 )
@@ -376,6 +377,13 @@ class Store:
                         f"(owner={status.owner}; workflow settings may "
                         f"disable enforce_owners)"
                     )
+                if not transition_allowed(workflow, from_status, to_status):
+                    raise ValueError(
+                        f"workflow {workflow.id!r} does not allow moving "
+                        f"from {from_status!r} to {to_status!r} "
+                        f"(transition not permitted by the workflow's "
+                        f"transitions graph)"
+                    )
                 # column_order — append to the end of the project's column when not specified
                 if column_order is None:
                     r2 = self._conn.execute(
@@ -474,6 +482,13 @@ class Store:
                         f"workflow {workflow.id!r} does not allow actor "
                         f"{assignee!r} to claim tasks into {claim_to!r} "
                         f"(owner={target.owner})"
+                    )
+                if not transition_allowed(workflow, claim_from, claim_to):
+                    raise ValueError(
+                        f"workflow {workflow.id!r} does not allow claiming "
+                        f"from {claim_from!r} to {claim_to!r} "
+                        f"(transition not permitted by the workflow's "
+                        f"transitions graph)"
                     )
                 if row["assignee"] is not None and row["assignee"] != assignee:
                     raise RuntimeError(

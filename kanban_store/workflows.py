@@ -168,6 +168,26 @@ def actor_may_enter(workflow: Workflow, to_status: str, actor: str) -> bool:
     return owner == actor_kind(actor)
 
 
+def transition_allowed(workflow: Workflow, from_status: str, to_status: str) -> bool:
+    """Whether the workflow's optional transition graph allows from → to.
+
+    Opt-in via the workflow's ``transitions`` setting: a map of
+    ``from_status`` → list of allowed target statuses, e.g.
+    ``{"backlog": ["approved", "blocked"]}``. Statuses absent from the
+    map have unrestricted outgoing transitions; the whole setting absent
+    (or malformed) means no structural restriction at all. Independent of
+    ``enforce_owners`` — graphs constrain structure, owners constrain
+    actors.
+    """
+    graph = workflow_settings(workflow).get("transitions")
+    if not isinstance(graph, dict):
+        return True
+    allowed = graph.get(from_status)
+    if not isinstance(allowed, list) or not all(isinstance(s, str) for s in allowed):
+        return True
+    return to_status in allowed
+
+
 def validate_workflow_statuses(raw: list[dict[str, Any]]) -> list[WorkflowStatus]:
     """Validate a raw status list and return ordered WorkflowStatus objects."""
     if not isinstance(raw, list) or not raw:
@@ -216,6 +236,7 @@ __all__ = [
     "actor_kind",
     "actor_may_enter",
     "default_workflow",
+    "transition_allowed",
     "validate_workflow_statuses",
     "workflow_settings",
 ]

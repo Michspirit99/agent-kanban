@@ -13,9 +13,11 @@ import pytest
 
 from kanban_store import Store
 from kanban_store.workflows import (
+    Workflow,
     actor_kind,
     actor_may_enter,
     default_workflow,
+    transition_allowed,
     workflow_settings,
 )
 
@@ -102,6 +104,59 @@ def test_actor_may_enter_enforced_split():
     assert actor_may_enter(enforced, "done", "automation") is False
     # unknown status: the caller's validation reports it; deny here
     assert actor_may_enter(enforced, "nope", "user") is False
+
+
+# ---------------------------------------------------------------------------
+# Transition graphs (Phase 5b): optional per-status allowed-next lists
+# ---------------------------------------------------------------------------
+
+
+def graphed_workflow(store_unused: None = None, **settings_overrides) -> Workflow:
+    settings = {
+        "transitions": {
+            "backlog": ["approved", "blocked"],
+            "approved": ["analyst"],
+        }
+    }
+    settings.update(settings_overrides)
+    base = default_workflow()
+    return Workflow(
+        id=base.id, name=base.name, statuses=base.statuses, settings=settings
+    )
+
+
+def test_transition_allowed_without_setting_is_open():
+    workflow = default_workflow()
+
+    assert transition_allowed(workflow, "backlog", "done") is True
+
+
+def test_transition_allowed_respects_graph():
+    workflow = graphed_workflow()
+
+    assert transition_allowed(workflow, "backlog", "approved") is True
+    assert transition_allowed(workflow, "backlog", "blocked") is True
+    assert transition_allowed(workflow, "backlog", "done") is False
+    assert transition_allowed(workflow, "approved", "analyst") is True
+    assert transition_allowed(workflow, "approved", "done") is False
+
+
+def test_transition_allowed_statuses_absent_from_graph_are_open():
+    workflow = graphed_workflow()
+
+    # 'uat' has no entry: transitions out of it are unrestricted
+    assert transition_allowed(workflow, "uat", "done") is True
+    assert transition_allowed(workflow, "uat", "backlog") is True
+
+
+def test_transition_allowed_ignores_malformed_entries():
+    workflow = graphed_workflow(**{"transitions": {"backlog": "not-a-list"}})
+
+    assert transition_allowed(workflow, "backlog", "done") is True
+
+    workflow = graphed_workflow(**{"transitions": "garbage"})
+
+    assert transition_allowed(workflow, "backlog", "done") is True
 
 
 # ---------------------------------------------------------------------------
@@ -295,3 +350,93 @@ def test_mcp_move_reports_enforcement_error(store, monkeypatch):
     assert result["ok"] is False
     assert "uat" in result["error"]
     assert store.get_task(task.id).status == "backlog"
+
+
+# ---------------------------------------------------------------------------
+# Graph wiring (Phase 5b): Store + REST
+# ---------------------------------------------------------------------------
+
+
+def enable_graph(store: Store, workflow_id: str = "default") -> None:
+    import json
+
+    store._conn.execute(
+        "UPDATE workflows SET settings_json=? WHERE id=?",
+        (
+            json.dumps(
+                {
+                    "transitions": {
+                        "backlog": ["approved", "blocked"],
+                        "approved": ["analyst"],
+                    }
+                }
+            ),
+            workflow_id,
+        ),
+    )
+
+
+def test_move_task_graph_blocks_skipped_statuses(store):
+    enable_graph(store)
+    task = store.create_task("Graphed", actor="user")
+
+    with pytest.raises(ValueError, match="transition"):
+        store.move_task(task.id, "done", actor="user")
+
+    assert store.get_task(task.id).status == "backlog"
+    assert [
+        e for e in store.list_pending_events() if e["event_type"] == "task_moved"
+    ] == []
+
+
+def test_move_task_graph_allows_listed_transitions(store):
+    enable_graph(store)
+    task = store.create_task("Graphed", actor="user")
+
+    assert store.move_task(task.id, "blocked", actor="user").status == "blocked"
+    back = store.move_task(task.id, "backlog", actor="user")  # unlisted: open
+
+    assert back.status == "backlog"
+    assert store.move_task(task.id, "approved", actor="claude").status == "approved"
+
+
+def test_pull_task_respects_graph(store):
+    enable_graph(store)
+    task = store.create_task("Claim path", actor="user")
+    store.move_task(task.id, "approved", actor="claude")
+
+    # graph: approved → analyst only, and the default claim is approved → analyst
+    pulled = store.pull_task(task.id, assignee="claude")
+
+    assert pulled.status == "analyst"
+
+
+def test_pull_task_graph_blocks_undesignated_claim(store):
+    store._conn.execute(
+        "UPDATE workflows SET settings_json=? WHERE id='default'",
+        (
+            '{"claim_from": "approved", "claim_to": "done", '
+            '"transitions": {"approved": ["analyst"]}}',
+        ),
+    )
+    task = store.create_task("Wrong claim", actor="user")
+    store.move_task(task.id, "approved", actor="claude")
+
+    with pytest.raises(ValueError, match="transition"):
+        store.pull_task(task.id, assignee="claude")
+
+    assert store.get_task(task.id).status == "approved"
+
+
+def test_rest_move_reports_graph_rejection(api_client, monkeypatch):
+    client, db = api_client
+    enable_graph(db)
+    monkeypatch.setenv("KANBAN_ACTOR", "michs")
+    task_id = client.post(
+        "/api/tasks", json={"title": "Graphed REST", "project_id": "default"}
+    ).json()["id"]
+
+    response = client.post(f"/api/tasks/{task_id}/move", json={"to_status": "done"})
+
+    assert response.status_code == 400
+    assert "transition" in response.json()["detail"]
