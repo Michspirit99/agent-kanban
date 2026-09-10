@@ -306,6 +306,135 @@ def test_dispatcher_marks_unknown_event_types_delivered(store, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Retention: delivered events expire, pending events are never touched
+# ---------------------------------------------------------------------------
+
+
+def _insert_event(
+    store: Store,
+    event_id: int,
+    *,
+    created_at: str,
+    delivered_at: str | None,
+) -> None:
+    store._conn.execute(
+        """INSERT INTO issue_events
+           (id, event_type, task_id, project_id, actor, payload_json,
+            created_at, delivered_at)
+           VALUES (?, 'task_created', 'T-001', 'default', 'user', '{}', ?, ?)""",
+        (event_id, created_at, delivered_at),
+    )
+
+
+def test_prune_deletes_only_old_delivered_events(store):
+    _insert_event(store, 1, created_at="2020-01-01T00:00:00+00:00", delivered_at="2020-01-01T01:00:00+00:00")
+    _insert_event(store, 2, created_at="2020-01-01T00:00:00+00:00", delivered_at=None)
+    _insert_event(store, 3, created_at="2099-01-01T00:00:00+00:00", delivered_at="2099-01-01T01:00:00+00:00")
+
+    deleted = store.prune_delivered_events(retention_days=14)
+
+    assert deleted == 1
+    remaining = [r["id"] for r in store._conn.execute(
+        "SELECT id FROM issue_events ORDER BY id"
+    ).fetchall()]
+    assert remaining == [2, 3]  # pending old + delivered recent survive
+
+
+def test_prune_returns_zero_when_nothing_expired(store):
+    _insert_event(store, 1, created_at="2099-01-01T00:00:00+00:00", delivered_at="2099-01-01T01:00:00+00:00")
+
+    assert store.prune_delivered_events(retention_days=14) == 0
+
+
+def test_prune_respects_limit_batching(store):
+    for i in range(1, 6):
+        _insert_event(store, i, created_at="2020-01-01T00:00:00+00:00", delivered_at="2020-01-01T01:00:00+00:00")
+
+    first = store.prune_delivered_events(retention_days=14, limit=2)
+    second = store.prune_delivered_events(retention_days=14, limit=2)
+    third = store.prune_delivered_events(retention_days=14, limit=2)
+
+    assert (first, second, third) == (2, 2, 1)
+    assert store._conn.execute("SELECT COUNT(*) AS n FROM issue_events").fetchone()["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher retention wiring: cadence + env var + status
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_prunes_when_due_and_reports_status(store):
+    from kanban_ui.automation import event_dispatcher
+    from kanban_ui.automation.event_dispatcher import EventDispatcher
+
+    _insert_event(store, 1, created_at="2020-01-01T00:00:00+00:00", delivered_at="2020-01-01T01:00:00+00:00")
+    _insert_event(store, 2, created_at="2020-01-01T00:00:00+00:00", delivered_at=None)
+    dispatcher = EventDispatcher(store, retention_days=14, prune_interval=3600.0)
+    monkeypatch_status = event_dispatcher._status
+    monkeypatch_status["pruned_total"] = 0
+
+    deleted = dispatcher.maybe_prune()
+
+    assert deleted == 1
+    # the old delivered row is gone, the old pending row survives
+    assert [
+        e["id"] for e in store.list_pending_events()
+    ] == [2]
+    assert store._conn.execute(
+        "SELECT COUNT(*) AS n FROM issue_events"
+    ).fetchone()["n"] == 1
+    assert monkeypatch_status["pruned_total"] == 1
+    assert monkeypatch_status["last_pruned_at"] is not None
+
+    # cadence: not due again immediately
+    assert dispatcher.maybe_prune() is None
+
+
+def test_dispatcher_respects_retention_env_var(store, monkeypatch):
+    from kanban_ui.automation.event_dispatcher import EventDispatcher
+
+    monkeypatch.setenv("KANBAN_EVENT_RETENTION_DAYS", "30")
+
+    dispatcher = EventDispatcher(store)
+
+    assert dispatcher.retention_days == 30.0
+
+
+def test_dispatcher_retention_env_var_default(store, monkeypatch):
+    from kanban_ui.automation.event_dispatcher import EventDispatcher
+
+    monkeypatch.delenv("KANBAN_EVENT_RETENTION_DAYS", raising=False)
+
+    dispatcher = EventDispatcher(store)
+
+    assert dispatcher.retention_days == 14.0
+
+
+def test_run_loop_prunes_automatically(store):
+    from kanban_ui.automation.event_dispatcher import EventDispatcher
+
+    _insert_event(store, 1, created_at="2020-01-01T00:00:00+00:00", delivered_at="2020-01-01T01:00:00+00:00")
+    dispatcher = EventDispatcher(store, interval=0.05, prune_interval=0.0)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(dispatcher.run())
+        await asyncio.sleep(0.3)
+        dispatcher.stop()
+        await task
+
+    asyncio.run(scenario())
+
+    assert store._conn.execute("SELECT COUNT(*) AS n FROM issue_events").fetchone()["n"] == 0
+    assert event_dispatcher_status()["pruned_total"] >= 1
+
+
+def event_dispatcher_status() -> dict[str, Any]:
+    from kanban_ui.automation import events_status
+
+    return events_status()
+
+
+# ---------------------------------------------------------------------------
 # REST parity + lifespan wiring (dispatcher drains the outbox)
 # ---------------------------------------------------------------------------
 

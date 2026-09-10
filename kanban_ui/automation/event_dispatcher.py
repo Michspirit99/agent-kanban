@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -30,6 +31,8 @@ from . import rules, webhooks
 log = logging.getLogger("kanban.automation.events")
 
 DEFAULT_INTERVAL = float(os.environ.get("KANBAN_EVENT_POLL_INTERVAL", "1.0"))
+DEFAULT_RETENTION_DAYS = 14.0
+DEFAULT_PRUNE_INTERVAL = 3600.0  # check for expired events once per hour
 BATCH_SIZE = 100
 
 Emitter = Callable[[str, dict[str, Any]], Any]
@@ -39,6 +42,9 @@ _status: dict[str, Any] = {
     "interval_sec": DEFAULT_INTERVAL,
     "processed_total": 0,
     "last_processed_at": None,
+    "retention_days": DEFAULT_RETENTION_DAYS,
+    "pruned_total": 0,
+    "last_pruned_at": None,
 }
 
 
@@ -67,12 +73,25 @@ class EventDispatcher:
         batch_size: int = BATCH_SIZE,
         emit_webhook: Emitter | None = None,
         apply_reactive: Emitter | None = None,
+        retention_days: float | None = None,
+        prune_interval: float = DEFAULT_PRUNE_INTERVAL,
     ):
         self.store = store
         self.interval = interval
         self.batch_size = batch_size
         self._emit_webhook: Emitter = emit_webhook or webhooks.emit_event
         self._apply_reactive: Emitter = apply_reactive or rules.emit_rule_event
+        self.retention_days = (
+            retention_days
+            if retention_days is not None
+            else float(
+                os.environ.get(
+                    "KANBAN_EVENT_RETENTION_DAYS", str(DEFAULT_RETENTION_DAYS)
+                )
+            )
+        )
+        self.prune_interval = prune_interval
+        self._last_prune: float | None = None
         self._stop = asyncio.Event()
 
     async def _deliver(self, event: dict[str, Any]) -> None:
@@ -109,16 +128,41 @@ class EventDispatcher:
             _status["last_processed_at"] = _now()
         return processed
 
+    def maybe_prune(self) -> int | None:
+        """Prune expired delivered events when the prune interval elapses.
+
+        Returns the number of rows deleted, or None when not due.
+        """
+        now = time.monotonic()
+        if (
+            self._last_prune is not None
+            and (now - self._last_prune) < self.prune_interval
+        ):
+            return None
+        deleted = self.store.prune_delivered_events(self.retention_days)
+        self._last_prune = now
+        if deleted:
+            _status["pruned_total"] += deleted
+            _status["last_pruned_at"] = _now()
+            log.info(
+                "pruned %d delivered event(s) (retention=%sd)",
+                deleted, self.retention_days,
+            )
+        return deleted
+
     async def run(self) -> None:
         _status["running"] = True
         _status["interval_sec"] = self.interval
+        _status["retention_days"] = self.retention_days
         log.info(
-            "event dispatcher started (interval=%ss)", self.interval
+            "event dispatcher started (interval=%ss, retention=%sd)",
+            self.interval, self.retention_days,
         )
         try:
             while not self._stop.is_set():
                 try:
                     await self.process_pending()
+                    self.maybe_prune()
                 except Exception:
                     log.exception("event dispatcher: poll failed")
                 try:

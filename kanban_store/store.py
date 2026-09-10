@@ -22,7 +22,7 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -754,6 +754,36 @@ class Store:
                 "UPDATE issue_events SET delivered_at=? WHERE id=?",
                 (_now(), event_id),
             )
+
+    def prune_delivered_events(self, retention_days: float, *, limit: int = 500) -> int:
+        """Delete delivered outbox events older than the retention window.
+
+        Pending events are never touched regardless of age. Deletion is
+        batched with LIMIT so a large backlog cannot turn into one huge
+        transaction; call repeatedly until it returns 0. Returns the number
+        of rows deleted.
+
+        Timestamp comparison is lexicographic ISO-8601: every created_at is
+        produced by the same UTC producer, so string ordering is correct.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                cur = self._conn.execute(
+                    "DELETE FROM issue_events WHERE id IN ("
+                    "SELECT id FROM issue_events WHERE delivered_at IS NOT NULL "
+                    "AND created_at < ? ORDER BY id LIMIT ?)",
+                    (cutoff, limit),
+                )
+                deleted = cur.rowcount
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return deleted
 
     def schema_version(self) -> int:
         """Recorded schema version of this database (0 if absent)."""

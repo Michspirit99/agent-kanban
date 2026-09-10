@@ -137,6 +137,7 @@ Real-world flows: [`docs/USECASES.md`](docs/USECASES.md) — 11 use cases (solo 
 | `KANBAN_WEBHOOKS_FILE` | `<repo>/kanban_data/webhooks.json` | outbound webhook notifications |
 | `KANBAN_AUTOMATION_INTERVAL` | `60` | rule engine interval (sec) |
 | `KANBAN_EVENT_POLL_INTERVAL` | `1` | event dispatcher poll interval (sec) |
+| `KANBAN_EVENT_RETENTION_DAYS` | `14` | delete delivered outbox events older than this (days) |
 | `KANBAN_INBOX_INTERVAL` | `5` | inbox poll interval (sec) |
 | `KANBAN_CORS_ORIGINS` | (empty) | comma-separated origins for CORS (e.g. for remote Open WebUI) |
 | `KANBAN_PROJECT_ID` | (empty) | for MCP server: default project_id when agent calls `kanban_create` without one |
