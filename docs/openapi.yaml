@@ -615,6 +615,31 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Snapshot Api Snapshot Post
+  /api/snapshot/import:
+    post:
+      summary: Import Snapshot
+      operationId: import_snapshot_api_snapshot_import_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SnapshotImportRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Import Snapshot Api Snapshot Import Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/automation/status:
     get:
       summary: Get Automation Status
@@ -851,6 +876,16 @@ components:
           title: Path
       type: object
       title: ProjectUpdate
+    SnapshotImportRequest:
+      properties:
+        snapshot:
+          title: Snapshot
+          description: The snapshot JSON object to import; no server-side file is
+            read.
+      type: object
+      required:
+      - snapshot
+      title: SnapshotImportRequest
     SourceGitRequest:
       properties:
         repo_url:
@@ -984,4 +1019,3 @@ components:
       - msg
       - type
       title: ValidationError
-

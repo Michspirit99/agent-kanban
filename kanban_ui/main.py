@@ -17,6 +17,7 @@ Endpoints (v2):
     POST   /api/tasks/{task_id}/links
     POST   /api/tasks/{task_id}/blockers
     POST   /api/snapshot              — persist a board snapshot
+    POST   /api/snapshot/import       — import a JSON board snapshot
 """
 from __future__ import annotations
 
@@ -36,7 +37,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kanban_store import Store, STATUSES, status_meta
-from kanban_store.store import DEFAULT_PROJECT_ID
+from kanban_store.snapshot_format import SnapshotFormatError
+from kanban_store.store import DEFAULT_PROJECT_ID, SnapshotImportConflict
 from kanban_ui.automation import (
     InboxWatcher,
     RuleEngine,
@@ -214,6 +216,13 @@ class SourcePlanLocalRequest(BaseModel):
 class SourceGitRequest(BaseModel):
     repo_url: str
     token: str = ""
+
+
+class SnapshotImportRequest(BaseModel):
+    snapshot: Any = Field(
+        ...,
+        description="The snapshot JSON object to import; no server-side file is read.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +728,17 @@ def set_blockers(task_id: str, req: BlockersRequest) -> dict[str, Any]:
 def snapshot() -> dict[str, Any]:
     fp = _store.save_snapshot()
     return {"ok": True, "path": str(fp)}
+
+
+@app.post("/api/snapshot/import")
+def import_snapshot(req: SnapshotImportRequest) -> dict[str, Any]:
+    try:
+        report = _store.import_snapshot(req.snapshot)
+    except SnapshotImportConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (SnapshotFormatError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "imported": report}
 
 
 # ---------------------------------------------------------------------------

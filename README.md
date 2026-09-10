@@ -93,6 +93,24 @@ The kanban runs **two MCP transports in parallel**: legacy stdio (`python -m kan
 
 Static OpenAPI schema: [`docs/openapi.yaml`](docs/openapi.yaml). Interactive Swagger: `http://localhost:7777/docs`.
 
+### Snapshot API
+
+`POST /api/snapshot` exports the complete board to the server's
+`snapshots/` directory and retains its response contract:
+`{"ok": true, "path": "..."}`. The export is written atomically.
+
+`POST /api/snapshot/import` accepts an inline JSON body of the form
+`{"snapshot": { ... }}`. A successful import returns
+`{"ok": true, "imported": { ...counts }}`. Imports add missing durable rows;
+repeating an identical snapshot is safe and returns zero inserted rows.
+Malformed or unsupported snapshots return HTTP 400. A snapshot that conflicts
+with existing durable data returns HTTP 409, and validation/conflict checks
+happen before writes so failed imports do not partially mutate the board.
+
+The import API accepts snapshot JSON only: it does not accept a filename,
+server-side path, or URL, and never reads files named by the request. Treat
+snapshot contents as trusted board data and review them before importing.
+
 Real-world flows: [`docs/USECASES.md`](docs/USECASES.md) — 11 use cases (solo dev, team Slack, legacy import, multi-project, agent session, auto-launch, etc.).
 
 ## Why
