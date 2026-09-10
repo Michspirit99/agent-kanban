@@ -311,6 +311,9 @@ def kanban_create(
     external_blocker: str | None = None,
     actor: str = "claude",
     project_id: str | None = None,
+    issue_type: str = "task",
+    reporter: str | None = None,
+    labels: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a new card. Defaults to Backlog; for immediate work pass status='in_progress'.
 
@@ -322,6 +325,9 @@ def kanban_create(
         size: S (<30 min) / M (<2 h) / L (>2 h).
         project_id: project slug; None = default (see KANBAN_DEFAULT_PROJECT_ID
                     or KANBAN_PROJECT_ID env).
+        issue_type: free-form issue type key (task/bug/story/epic).
+        reporter: who reported the issue.
+        labels: list of label strings.
     """
     if status not in STATUSES:
         return _err(f"unknown status: {status}")
@@ -337,6 +343,9 @@ def kanban_create(
             external_blocker=external_blocker,
             actor=actor,
             project_id=pid,
+            issue_type=issue_type,
+            reporter=reporter,
+            labels=labels,
         )
     except Exception as e:
         return _err(str(e))
@@ -380,6 +389,9 @@ def kanban_update(
     size: str | None = None,
     external_blocker: str | None = None,
     actor: str = "claude",
+    issue_type: str | None = None,
+    reporter: str | None = None,
+    labels: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update any card fields (except status/assignee — use kanban_move/kanban_pull for those)."""
     try:
@@ -392,6 +404,9 @@ def kanban_update(
             priority=priority,
             size=size,
             external_blocker=external_blocker,
+            issue_type=issue_type,
+            reporter=reporter,
+            labels=labels,
         )
     except KeyError:
         return _err(f"task {task_id} not found")

@@ -17,7 +17,7 @@ from typing import Callable
 log = logging.getLogger("kanban.store.migrations")
 
 SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
-LATEST_VERSION = 4
+LATEST_VERSION = 5
 BUSY_TIMEOUT_MS = 5000
 
 MigrationFn = Callable[[sqlite3.Connection], None]
@@ -74,10 +74,44 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     """v3 → v4: project_sources table (created via schema.sql baseline)."""
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """v4 → v5: additive issue fields with safe defaults.
+
+    Adds issue_type, reporter, labels_json, custom_fields_json and
+    updated_at to ``tasks`` without renaming or rewriting existing data;
+    backfills ``updated_at`` from ``created_at`` so legacy rows keep a
+    meaningful last-edit timestamp.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "issue_type" not in cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN issue_type TEXT NOT NULL DEFAULT 'task'"
+        )
+    if "reporter" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN reporter TEXT")
+    if "labels_json" not in cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "custom_fields_json" not in cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN custom_fields_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN updated_at TEXT")
+    conn.execute("UPDATE tasks SET updated_at = created_at WHERE updated_at IS NULL")
+
+
 MIGRATIONS: list[tuple[int, str, MigrationFn, bool]] = [
     (2, "tasks.project_id + default project bootstrap", _migrate_v2, True),
     (3, "projects.path", _migrate_v3, False),
     (4, "project_sources", _migrate_v4, False),
+    (
+        5,
+        "issue fields (issue_type/reporter/labels/custom_fields/updated_at)",
+        _migrate_v5,
+        False,
+    ),
 ]
 
 

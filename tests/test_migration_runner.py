@@ -52,7 +52,7 @@ def test_apply_migrations_returns_latest_version(tmp_path):
 
     version = mig.apply_migrations(conn)
 
-    assert version == mig.LATEST_VERSION == 4
+    assert version == mig.LATEST_VERSION == 5
     conn.close()
 
 
@@ -79,7 +79,7 @@ def test_reopen_is_idempotent(tmp_path, monkeypatch):
             version = reopened._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()["value"]
-            assert version == "4"
+            assert version == "5"
             assert len(reopened.list_tasks()) == 1
             assert reopened._conn.execute(
                 "SELECT value FROM meta WHERE key='next_id'"
@@ -96,16 +96,16 @@ def test_failing_migration_rolls_back_version_and_data(tmp_path):
     def boom(_conn):
         raise RuntimeError("boom-injected")
 
-    # v2/v3 commit (version advances to 3); the failing v4 step must roll
+    # v2/v3/v4 commit (version advances to 4); the failing v5 step must roll
     # back without advancing the version or corrupting committed data.
-    failing = mig.MIGRATIONS[:-1] + [(4, "boom", boom, False)]
+    failing = mig.MIGRATIONS[:-1] + [(5, "boom", boom, False)]
 
     with pytest.raises(RuntimeError, match="boom-injected"):
         mig.apply_migrations(conn, migrations=failing)
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()[0] == "3"
+    ).fetchone()[0] == "4"
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
     conn.close()
 
@@ -115,7 +115,7 @@ def test_failing_migration_rolls_back_version_and_data(tmp_path):
         version = store._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()["value"]
-        assert version == "4"
+        assert version == "5"
     finally:
         store.close()
 

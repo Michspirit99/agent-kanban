@@ -959,6 +959,20 @@ components:
           type: string
           title: Project Id
           default: default
+        issue_type:
+          type: string
+          title: Issue Type
+          default: task
+        reporter:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reporter
+        labels:
+          items:
+            type: string
+          type: array
+          title: Labels
       type: object
       required:
       - title
@@ -995,6 +1009,23 @@ components:
           - type: string
           - type: 'null'
           title: External Blocker
+        issue_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issue Type
+        reporter:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reporter
+        labels:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Labels
       type: object
       title: TaskUpdate
     ValidationError:

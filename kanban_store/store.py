@@ -27,10 +27,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .migrations import BUSY_TIMEOUT_MS, apply_migrations
+from .models import DEFAULT_PROJECT_ID, Issue, TaskHistory
 from .snapshot_format import normalize_snapshot
 from .snapshot_io import write_json_atomic
 
-DEFAULT_PROJECT_ID = os.environ.get("KANBAN_DEFAULT_PROJECT_ID", "default")
+# ``Task`` is the historical public name; ``Issue`` is the canonical model.
+Task = Issue
 
 
 class SnapshotImportConflict(ValueError):
@@ -70,45 +72,9 @@ def status_meta() -> list[dict[str, str]]:
 
 
 # ============================================================================
-# Models
+# Models — canonical definitions live in kanban_store.models; ``Task`` is a
+# compatibility alias for the canonical ``Issue`` model.
 # ============================================================================
-
-
-@dataclass
-class TaskHistory:
-    id: int
-    task_id: str
-    ts: str
-    actor: str
-    action: str
-    from_status: str | None
-    to_status: str | None
-    comment: str | None
-
-
-@dataclass
-class Task:
-    id: str
-    title: str
-    status: str
-    priority: str
-    size: str
-    assignee: str | None
-    description: str
-    acceptance: str
-    external_blocker: str | None
-    created_at: str
-    moved_at: str
-    column_order: int
-    project_id: str = DEFAULT_PROJECT_ID
-    links: list[dict[str, str]] = field(default_factory=list)
-    history: list[TaskHistory] = field(default_factory=list)
-    blockers: list[str] = field(default_factory=list)
-
-    def to_public(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["history"] = [asdict(h) for h in self.history]
-        return d
 
 
 @dataclass
@@ -135,6 +101,16 @@ class Project:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _validate_issue_fields(issue_type: str, labels: list[str] | None) -> None:
+    if not isinstance(issue_type, str) or not issue_type.strip():
+        raise ValueError("issue_type must be a non-empty string")
+    if labels is not None:
+        if not isinstance(labels, list) or not all(
+            isinstance(label, str) for label in labels
+        ):
+            raise ValueError("labels must be a list of strings")
 
 
 class Store:
@@ -257,9 +233,13 @@ class Store:
         links: list[dict[str, str]] | None = None,
         task_id: str | None = None,
         project_id: str = DEFAULT_PROJECT_ID,
+        issue_type: str = "task",
+        reporter: str | None = None,
+        labels: list[str] | None = None,
     ) -> Task:
         if status not in STATUSES:
             raise ValueError(f"unknown status: {status}")
+        _validate_issue_fields(issue_type, labels)
         ts = _now()
         with self._lock:
             self._conn.execute("BEGIN")
@@ -281,8 +261,10 @@ class Store:
                     """
                     INSERT INTO tasks (id, title, status, priority, size, assignee,
                                         description, acceptance, external_blocker,
-                                        created_at, moved_at, column_order, project_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        created_at, moved_at, column_order, project_id,
+                                        issue_type, reporter, labels_json,
+                                        custom_fields_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid,
@@ -298,6 +280,11 @@ class Store:
                         ts,
                         col_order,
                         project_id,
+                        issue_type,
+                        reporter,
+                        json.dumps(labels or [], ensure_ascii=False),
+                        "{}",
+                        ts,
                     ),
                 )
                 if links:
@@ -513,10 +500,21 @@ class Store:
         description: str | None = None,
         acceptance: str | None = None,
         external_blocker: str | None = None,
+        issue_type: str | None = None,
+        reporter: str | None = None,
+        labels: list[str] | None = None,
     ) -> Task:
+        if issue_type is not None:
+            _validate_issue_fields(issue_type, None)
+        if labels is not None and (
+            not isinstance(labels, list)
+            or not all(isinstance(label, str) for label in labels)
+        ):
+            raise ValueError("labels must be a list of strings")
         ts = _now()
         sets: list[str] = []
         params: list[Any] = []
+        changed: list[str] = []
         for col, val in (
             ("title", title),
             ("priority", priority),
@@ -524,15 +522,24 @@ class Store:
             ("description", description),
             ("acceptance", acceptance),
             ("external_blocker", external_blocker),
+            ("issue_type", issue_type),
+            ("reporter", reporter),
         ):
             if val is not None:
                 sets.append(f"{col} = ?")
                 params.append(val)
+                changed.append(col)
+        if labels is not None:
+            sets.append("labels_json = ?")
+            params.append(json.dumps(labels, ensure_ascii=False))
+            changed.append("labels")
         if not sets:
             t = self.get_task(task_id)
             if t is None:
                 raise KeyError(task_id)
             return t
+        sets.append("updated_at = ?")
+        params.append(ts)
         params.append(task_id)
         with self._lock:
             self._conn.execute("BEGIN")
@@ -549,7 +556,7 @@ class Store:
                     """INSERT INTO task_history
                        (task_id, ts, actor, action, from_status, to_status, comment)
                        VALUES (?, ?, ?, 'update', NULL, NULL, ?)""",
-                    (task_id, ts, actor, ", ".join(s.split(" = ")[0] for s in sets)),
+                    (task_id, ts, actor, ", ".join(changed)),
                 )
                 self._conn.execute("COMMIT")
             except Exception:
@@ -920,12 +927,24 @@ class Store:
                 )
                 for task in tasks:
                     current = existing_tasks.get(task["id"])
-                    if current is not None and any(
-                        current[column] != task[column] for column in task_columns
-                    ):
-                        raise SnapshotImportConflict(
-                            f"task {task['id']!r} conflicts with existing durable data"
-                        )
+                    if current is not None:
+                        if any(
+                            current[column] != task[column] for column in task_columns
+                        ):
+                            raise SnapshotImportConflict(
+                                f"task {task['id']!r} conflicts with existing durable data"
+                            )
+                        if (
+                            current["issue_type"] != task.get("issue_type", "task")
+                            or current["reporter"] != task.get("reporter")
+                            or current["updated_at"]
+                            != (task.get("updated_at") or task["created_at"])
+                            or json.loads(current["labels_json"] or "[]")
+                            != task.get("labels", [])
+                        ):
+                            raise SnapshotImportConflict(
+                                f"task {task['id']!r} conflicts with existing durable data"
+                            )
                 history_columns = (
                     "id", "task_id", "ts", "actor", "action",
                     "from_status", "to_status", "comment",
@@ -962,9 +981,23 @@ class Store:
                         """INSERT INTO tasks
                            (id, title, status, priority, size, assignee,
                             description, acceptance, external_blocker,
-                            created_at, moved_at, column_order, project_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        tuple(task[column] for column in task_columns),
+                            created_at, moved_at, column_order, project_id,
+                            issue_type, reporter, labels_json,
+                            custom_fields_json, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            task["id"], task["title"], task["status"],
+                            task["priority"], task["size"], task["assignee"],
+                            task["description"], task["acceptance"],
+                            task["external_blocker"], task["created_at"],
+                            task["moved_at"], task["column_order"],
+                            task["project_id"],
+                            task.get("issue_type", "task"),
+                            task.get("reporter"),
+                            json.dumps(task.get("labels", []), ensure_ascii=False),
+                            json.dumps(task.get("custom_fields", {}), ensure_ascii=False),
+                            task.get("updated_at") or task["created_at"],
+                        ),
                     )
                     inserted["tasks"] += 1
 
@@ -1078,6 +1111,25 @@ class Store:
             moved_at=row["moved_at"],
             column_order=row["column_order"],
             project_id=row["project_id"] if "project_id" in row.keys() else DEFAULT_PROJECT_ID,
+            issue_type=(
+                row["issue_type"] if "issue_type" in row.keys() else "task"
+            ),
+            reporter=row["reporter"] if "reporter" in row.keys() else None,
+            labels=(
+                json.loads(row["labels_json"])
+                if "labels_json" in row.keys() and row["labels_json"]
+                else []
+            ),
+            custom_fields=(
+                json.loads(row["custom_fields_json"])
+                if "custom_fields_json" in row.keys() and row["custom_fields_json"]
+                else {}
+            ),
+            updated_at=(
+                (row["updated_at"] or row["created_at"])
+                if "updated_at" in row.keys()
+                else row["created_at"]
+            ),
         )
         if eager_links:
             link_rows = self._conn.execute(

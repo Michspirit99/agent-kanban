@@ -153,6 +153,9 @@ class TaskCreate(BaseModel):
     external_blocker: str | None = None
     links: list[dict[str, str]] = Field(default_factory=list)
     project_id: str = DEFAULT_PROJECT_ID
+    issue_type: str = "task"
+    reporter: str | None = None
+    labels: list[str] = Field(default_factory=list)
 
 
 class TaskUpdate(BaseModel):
@@ -162,6 +165,9 @@ class TaskUpdate(BaseModel):
     priority: str | None = None
     size: str | None = None
     external_blocker: str | None = None
+    issue_type: str | None = None
+    reporter: str | None = None
+    labels: list[str] | None = None
 
 
 class MoveRequest(BaseModel):
@@ -614,6 +620,9 @@ async def create_task(req: TaskCreate) -> dict[str, Any]:
         actor=_actor(),
         links=req.links or None,
         project_id=req.project_id,
+        issue_type=req.issue_type,
+        reporter=req.reporter,
+        labels=req.labels or None,
     )
     await emit_event("task_created", {
         "task": t.to_public(),
@@ -634,6 +643,9 @@ async def update_task(task_id: str, req: TaskUpdate) -> dict[str, Any]:
             priority=req.priority,
             size=req.size,
             external_blocker=req.external_blocker,
+            issue_type=req.issue_type,
+            reporter=req.reporter,
+            labels=req.labels,
         )
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
@@ -642,6 +654,8 @@ async def update_task(task_id: str, req: TaskUpdate) -> dict[str, Any]:
             ("title", req.title), ("description", req.description),
             ("acceptance", req.acceptance), ("priority", req.priority),
             ("size", req.size), ("external_blocker", req.external_blocker),
+            ("issue_type", req.issue_type), ("reporter", req.reporter),
+            ("labels", req.labels),
         ) if v is not None
     ]
     await emit_event("task_updated", {

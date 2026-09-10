@@ -25,7 +25,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at      TEXT NOT NULL,                   -- ISO8601
     moved_at        TEXT NOT NULL,                   -- ISO8601, last status change
     column_order    INTEGER NOT NULL DEFAULT 0,      -- order within the column (for drag-drop)
-    project_id      TEXT NOT NULL DEFAULT 'default'  -- FK -> projects.id
+    project_id      TEXT NOT NULL DEFAULT 'default', -- FK -> projects.id
+    issue_type      TEXT NOT NULL DEFAULT 'task',    -- task/bug/story/epic (free-form key)
+    reporter        TEXT,                            -- who reported the issue
+    labels_json     TEXT NOT NULL DEFAULT '[]',      -- JSON array of label strings
+    custom_fields_json TEXT NOT NULL DEFAULT '{}',   -- JSON object of custom field values
+    updated_at      TEXT                             -- ISO8601, last content edit (not moves)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, column_order);
@@ -73,7 +78,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '5');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('next_id', '1');
 
 -- Default project — read from env ``KANBAN_DEFAULT_PROJECT_ID`` / ``..._NAME``
