@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .migrations import BUSY_TIMEOUT_MS, apply_migrations
 from .snapshot_format import normalize_snapshot
 from .snapshot_io import write_json_atomic
 
@@ -156,6 +157,9 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
+        # Explicit (rather than relying on sqlite3.connect's default timeout)
+        # so concurrent UI/MCP processes wait instead of failing fast.
+        self._conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         self._migrate()
 
     # ------------------------------------------------------------------
@@ -163,77 +167,9 @@ class Store:
     # ------------------------------------------------------------------
 
     def _migrate(self) -> None:
-        schema = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+        """Delegate schema setup and upgrades to the migration runner."""
         with self._lock:
-            self._conn.executescript(schema)
-            self._migrate_v2()
-            self._migrate_v3()
-            self._migrate_v4()
-
-    def _migrate_v4(self) -> None:
-        """v3 → v4: project_sources table (created via schema.sql,
-        this method only bumps the version)."""
-        row = self._conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
-        if row and int(row["value"]) < 4:
-            self._conn.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
-
-    def _migrate_v3(self) -> None:
-        """v2 → v3: projects.path TEXT (Claude Code project directory)."""
-        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(projects)").fetchall()}
-        if "path" not in cols:
-            self._conn.execute("ALTER TABLE projects ADD COLUMN path TEXT")
-        row = self._conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
-        if row and int(row["value"]) < 3:
-            self._conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
-
-    def _migrate_v2(self) -> None:
-        """v1 → v2: adds tasks.project_id for existing databases and
-        creates a default project (id/name are configurable via env).
-
-        Idempotent: checks PRAGMA table_info before running ALTER.
-        """
-        row = self._conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
-        version = int(row["value"]) if row else 1
-        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
-        if "project_id" not in cols:
-            # old pre-v2 database — add the column with a default
-            default_id = os.environ.get("KANBAN_DEFAULT_PROJECT_ID", "default")
-            self._conn.execute(
-                f"ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT '{default_id}'"
-            )
-        # The project_id index is always created (idempotent). For a fresh
-        # database the column appeared from CREATE TABLE in schema.sql; for
-        # older databases it is created after the ALTER above.
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_project_status "
-            "ON tasks(project_id, status, column_order)"
-        )
-        # The default project is created ONLY when the database has no
-        # projects at all (fresh install). Existing databases keep their
-        # own projects without an extra "default" being added on top.
-        row = self._conn.execute("SELECT COUNT(*) AS n FROM projects").fetchone()
-        if row["n"] == 0:
-            default_id = os.environ.get("KANBAN_DEFAULT_PROJECT_ID", "default")
-            default_name = os.environ.get("KANBAN_DEFAULT_PROJECT_NAME", "Default")
-            default_color = os.environ.get("KANBAN_DEFAULT_PROJECT_COLOR", "#F10D30")
-            default_icon = os.environ.get(
-                "KANBAN_DEFAULT_PROJECT_ICON", default_name[:1].upper()
-            )
-            self._conn.execute(
-                "INSERT INTO projects (id, name, color, icon, sort_order, archived, created_at) "
-                "VALUES (?, ?, ?, ?, 0, 0, ?)",
-                (default_id, default_name, default_color, default_icon, _now()),
-            )
-        if version < 2:
-            self._conn.execute(
-                "UPDATE meta SET value='2' WHERE key='schema_version'"
-            )
+            apply_migrations(self._conn)
 
     # ------------------------------------------------------------------
     # ID generation
