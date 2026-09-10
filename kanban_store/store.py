@@ -328,6 +328,11 @@ class Store:
         with self._lock:
             self._conn.execute("BEGIN")
             try:
+                project_row = self._conn.execute(
+                    "SELECT 1 FROM projects WHERE id=?", (project_id,)
+                ).fetchone()
+                if not project_row:
+                    raise ValueError(f"project {project_id!r} not found")
                 tid = task_id or self._next_id()
                 # column_order — last in the column + 1 (per project)
                 row = self._conn.execute(
